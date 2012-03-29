@@ -906,6 +906,7 @@ int tipc_link_send_buf(struct tipc_link *l_ptr, struct sk_buff *buf)
 					 INT_H_SIZE, l_ptr->addr);
 				skb_copy_to_linear_data(bundler, &bundler_hdr,
 							INT_H_SIZE);
+				bundler->priority = buf->priority;
 				skb_trim(bundler, INT_H_SIZE);
 				link_bundle_buf(l_ptr, bundler, buf);
 				buf = bundler;
@@ -1172,6 +1173,7 @@ static int link_send_sections_long(struct tipc_port *sender,
 	const unchar *sect_crs;
 	int curr_sect;
 	u32 fragm_no;
+	u32 priority;
 
 again:
 	fragm_no = 1;
@@ -1197,6 +1199,7 @@ again:
 	if (!buf)
 		return -ENOMEM;
 	buf->next = NULL;
+	priority = tipc_sk_priority(sender);
 	skb_copy_to_linear_data(buf, &fragm_hdr, INT_H_SIZE);
 	hsz = msg_hdr_sz(hdr);
 	skb_copy_to_linear_data_offset(buf, INT_H_SIZE, hdr, hsz);
@@ -1207,7 +1210,7 @@ again:
 
 	do {		/* For all sections */
 		u32 sz;
-
+		buf->priority = priority;
 		if (!sect_rest) {
 			sect_rest = msg_sect[++curr_sect].iov_len;
 			sect_crs = (const unchar *)msg_sect[curr_sect].iov_base;
@@ -2143,6 +2146,7 @@ static void tipc_link_tunnel(struct tipc_link *l_ptr,
 {
 	struct tipc_link *tunnel;
 	struct sk_buff *buf;
+	struct sk_buff *obuf;
 	u32 length = msg_size(msg);
 
 	tunnel = l_ptr->owner->active_links[selector & 1];
@@ -2156,6 +2160,10 @@ static void tipc_link_tunnel(struct tipc_link *l_ptr,
 		pr_warn("%sunable to send tunnel msg\n", link_co_err);
 		return;
 	}
+	/*copy the priority of the original skb to the tunneled one*/
+	if((obuf = container_of((void *)msg, struct sk_buff, data)))
+		buf->priority = obuf->priority;
+
 	skb_copy_to_linear_data(buf, tunnel_hdr, INT_H_SIZE);
 	skb_copy_to_linear_data_offset(buf, INT_H_SIZE, msg, length);
 	tipc_link_send_buf(tunnel, buf);
@@ -2255,6 +2263,7 @@ void tipc_link_send_duplicate(struct tipc_link *l_ptr, struct tipc_link *tunnel)
 				link_co_err);
 			return;
 		}
+		outbuf->priority = iter->priority;
 		skb_copy_to_linear_data(outbuf, &tunnel_hdr, INT_H_SIZE);
 		skb_copy_to_linear_data_offset(outbuf, INT_H_SIZE, iter->data,
 					       length);
@@ -2431,6 +2440,7 @@ static int link_send_long_buf(struct tipc_link *l_ptr, struct sk_buff *buf)
 			}
 			return -ENOMEM;
 		}
+		fragm->priority = buf->priority;
 		msg_set_size(&fragm_hdr, fragm_sz + INT_H_SIZE);
 		fragm_no++;
 		msg_set_fragm_no(&fragm_hdr, fragm_no);

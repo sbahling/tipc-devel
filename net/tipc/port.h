@@ -37,6 +37,7 @@
 #ifndef _TIPC_PORT_H
 #define _TIPC_PORT_H
 
+#include <net/sock.h>
 #include "ref.h"
 #include "net.h"
 #include "msg.h"
@@ -259,6 +260,15 @@ static inline struct tipc_port *tipc_port_deref(u32 ref)
 static inline int tipc_port_congested(struct tipc_port *p_ptr)
 {
 	return (p_ptr->sent - p_ptr->acked) >= (TIPC_FLOW_CONTROL_WIN * 2);
+}
+
+static inline int tipc_sk_priority(const struct tipc_port *p_ptr)
+{
+	struct sock *sk;
+
+	if ((sk = (struct sock *)p_ptr->usr_handle))
+		return sk->sk_priority;
+	return 0;
 }
 
 #endif

@@ -34,7 +34,9 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <net/sock.h>
 #include "core.h"
+#include "port.h"
 #include "msg.h"
 
 u32 tipc_msg_tot_importance(struct tipc_msg *m)
@@ -77,6 +79,7 @@ int tipc_msg_build(struct tipc_msg *hdr, struct iovec const *msg_sect,
 			    int max_size, int usrmem, struct sk_buff **buf)
 {
 	int dsz, sz, hsz, pos, res, cnt;
+	struct tipc_port *oport;
 
 	dsz = total_len;
 	pos = hsz = msg_hdr_sz(hdr);
@@ -90,6 +93,8 @@ int tipc_msg_build(struct tipc_msg *hdr, struct iovec const *msg_sect,
 	*buf = tipc_buf_acquire(sz);
 	if (!(*buf))
 		return -ENOMEM;
+	if ((oport = container_of((void *)hdr, struct tipc_port, phdr)))
+		(*buf)->priority = tipc_sk_priority(oport);
 	skb_copy_to_linear_data(*buf, hdr, hsz);
 	for (res = 1, cnt = 0; res && (cnt < num_sect); cnt++) {
 		if (likely(usrmem))

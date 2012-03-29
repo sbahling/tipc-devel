@@ -358,6 +358,7 @@ static struct sk_buff *port_build_proto_msg(struct tipc_port *p_ptr,
 
 	buf = tipc_buf_acquire(INT_H_SIZE);
 	if (buf) {
+		buf->priority = tipc_sk_priority(p_ptr);
 		msg = buf_msg(buf);
 		tipc_msg_init(msg, CONN_MANAGER, type, INT_H_SIZE,
 			      port_peernode(p_ptr));
@@ -373,6 +374,7 @@ int tipc_reject_msg(struct sk_buff *buf, u32 err)
 	struct tipc_msg *msg = buf_msg(buf);
 	struct sk_buff *rbuf;
 	struct tipc_msg *rmsg;
+	struct tipc_port *p_ptr;
 	int hdr_sz;
 	u32 imp;
 	u32 data_sz = msg_data_sz(msg);
@@ -417,17 +419,22 @@ int tipc_reject_msg(struct sk_buff *buf, u32 err)
 
 	/* send self-abort message when rejecting on a connected port */
 	if (msg_connected(msg)) {
-		struct tipc_port *p_ptr = tipc_port_lock(msg_destport(msg));
+		p_ptr = tipc_port_lock(msg_destport(msg));
 
 		if (p_ptr) {
 			struct sk_buff *abuf = NULL;
 
+			rbuf->priority = tipc_sk_priority(p_ptr);
 			if (p_ptr->connected)
 				abuf = port_build_self_abort_msg(p_ptr, err);
 			tipc_port_unlock(p_ptr);
 			tipc_net_route_msg(abuf);
 		}
+	} else {
+		if (p_ptr = tipc_ref_deref(msg_destport(msg)))
+			rbuf->priority = tipc_sk_priority(p_ptr);
 	}
+
 
 	/* send returned message & dispose of rejected message */
 	src_node = msg_prevnode(msg);
@@ -518,6 +525,7 @@ static struct sk_buff *port_build_peer_abort_msg(struct tipc_port *p_ptr, u32 er
 
 	buf = tipc_buf_acquire(BASIC_H_SIZE);
 	if (buf) {
+		buf->priority = tipc_sk_priority(p_ptr);
 		msg = buf_msg(buf);
 		memcpy(msg, &p_ptr->phdr, BASIC_H_SIZE);
 		msg_set_hdr_sz(msg, BASIC_H_SIZE);

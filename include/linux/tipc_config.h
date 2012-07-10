@@ -159,8 +159,8 @@
  */
 
 #define TIPC_MAX_MEDIA_NAME	16	/* format = media */
-#define TIPC_MAX_IF_NAME	16	/* format = interface */
-#define TIPC_MAX_BEARER_NAME	32	/* format = media:interface */
+#define TIPC_MAX_IF_NAME	46	/* format = interface/ip[:ip] */
+#define TIPC_MAX_BEARER_NAME	64	/* format = media:interface/ip[:ip] */
 #define TIPC_MAX_LINK_NAME	60	/* format = Z.C.N:interface-Z.C.N:interface */
 
 /*

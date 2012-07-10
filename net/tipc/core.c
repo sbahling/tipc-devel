@@ -50,6 +50,9 @@
 /* global variables used by multiple sub-systems within TIPC */
 int tipc_random __read_mostly;
 
+const char tipc_alphabet[] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.:";
+
 /* configurable TIPC parameters */
 u32 tipc_own_addr __read_mostly;
 int tipc_max_ports __read_mostly;
@@ -87,6 +90,7 @@ static void tipc_core_stop_net(void)
 {
 	tipc_net_stop();
 	tipc_eth_media_stop();
+	tipc_udp_media_stop();
 }
 
 /**
@@ -98,6 +102,8 @@ int tipc_core_start_net(unsigned long addr)
 
 	tipc_net_start(addr);
 	res = tipc_eth_media_start();
+	if (!res)
+		res = tipc_udp_media_start();
 	if (res)
 		tipc_core_stop_net();
 	return res;

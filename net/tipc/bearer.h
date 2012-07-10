@@ -56,7 +56,7 @@
  * Identifiers of supported TIPC media types
  */
 #define TIPC_MEDIA_TYPE_ETH	1
-#define TIPC_MEDIA_TYPE_UDP	2
+#define TIPC_MEDIA_TYPE_IP	2
 
 /**
  * struct tipc_media_addr - destination address used by TIPC bearers
@@ -177,6 +177,8 @@ int tipc_disable_bearer(const char *name);
  */
 int  tipc_eth_media_start(void);
 void tipc_eth_media_stop(void);
+int tipc_udp_media_start(void);
+void tipc_udp_media_stop(void);
 
 int tipc_media_set_priority(const char *name, u32 new_value);
 int tipc_media_set_window(const char *name, u32 new_value);

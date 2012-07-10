@@ -47,6 +47,7 @@
 #define IP_STR_MAX 64
 #define IP_ADDR_OFFSET	4
 #define TIPC_UDPPORT 2048
+#define MAX_SEND_QUEUE 256
 
 
 /**
@@ -108,13 +109,12 @@ struct udp_skb_meta{
 	struct tipc_media_addr *dest;
 	struct udp_bearer *ub_ptr;
 };
+
 static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 		    struct tipc_media_addr *dest)
 {
-//	struct udp_bearer *ub_ptr = &udp_bearers[0];
 	struct udp_skb_meta *meta;
 
-#define MAX_SEND_QUEUE 256
 	spin_lock_bh(&send_queue.lock);
 	if (skb_queue_len(&send_queue) >= MAX_SEND_QUEUE) {
 		spin_unlock_bh(&send_queue.lock);
@@ -129,31 +129,6 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 	spin_unlock_bh(&send_queue.lock);
 	wake_up_interruptible(&send_queue_wait);
 	return 0;
-
-/*
-	memset(&msg,0,sizeof(struct msghdr));
-	//TODO: need a ringbuffer here, defer sending to a kthread
-	
-	dst.sin_family = AF_INET;
-	memcpy(&dst.sin_addr.s_addr, dest->value, sizeof(struct in_addr));
-	dst.sin_port = TIPC_UDPPORT;
-//	dst.sin_port = IPPROTO_TIPC;
-	printk("send packet (%d bytes) to 0x%x\n", skb->len, 
-			dst.sin_addr.s_addr);
-	iov.iov_base = skb->data;
-	iov.iov_len = skb->len;
-	msg.msg_name = &dst;
-	msg.msg_namelen = sizeof(struct sockaddr_in);
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = NULL;
-	msg.msg_controllen = 0;
-	msg.msg_flags = 0;
-*/
-//	err = kernel_sendmsg(ub_ptr->socket, &msg, &iov, 1, skb->len);
-//	printk("sendmsg returned %d\n",err);
-	//TODO: handle congestion/block bearer
-//	return err;
 }
 
 static int tipc_udp_send(void *param)
@@ -172,8 +147,8 @@ again:
 				 kthread_should_stop());
 	if(kthread_should_stop())
 		return 0;
-	printk("tipc: woke up tipc_udp_send, got %d packets to send\n",
-		skb_queue_len(&send_queue));
+//	printk("tipc: woke up tipc_udp_send, got %d packets to send\n",
+//		skb_queue_len(&send_queue));
 
 	while (!skb_queue_empty(&send_queue)) {
 		memset(&msg,0,sizeof(struct msghdr));
@@ -188,13 +163,10 @@ again:
 		msg.msg_iov = &iov;
 		msg.msg_name = &dst;
 		msg.msg_namelen = sizeof(struct sockaddr_in);
-		msg.msg_control = NULL;	//XXX
-		msg.msg_controllen = 0;	//XXX
-		msg.msg_flags = 0;	//XXX
-		printk("send packet (%d bytes) to 0x%x\n", skb->len, 
-			dst.sin_addr.s_addr);
+//		printk("send packet (%d bytes) to 0x%x\n", skb->len, 
+//			dst.sin_addr.s_addr);
 		err = kernel_sendmsg(meta->ub_ptr->socket, &msg, &iov, 1, skb->len);
-		printk("sendmsg returned %d\n",err);
+//		printk("sendmsg returned %d\n",err);
 		
 		//TODO: When is skb freed?
 	}
@@ -251,6 +223,7 @@ static void enable_bearer_wh(struct work_struct *ws)
 
 	ub_ptr->task_send = kthread_run(tipc_udp_send, NULL, "tipc_udp_send");
 	ub_ptr->socket->sk->sk_data_ready = tipc_udp_recv;
+//	ub_ptr->socket->sk->skbacklog_rcv = 
 	udp_started = 1;
 	kfree(work);
 }

@@ -38,6 +38,7 @@
 #include <linux/socket.h>
 #include <net/sock.h>
 #include <linux/ip.h>
+#include <linux/udp.h>
 #include <linux/inet.h>
 #include <linux/kernel.h>
 #include <linux/kthread.h>
@@ -71,6 +72,7 @@ static int udp_addr2msg(struct tipc_media_addr *a, char *msg_area);
 static struct sk_buff_head send_queue;
 static DECLARE_WAIT_QUEUE_HEAD(send_queue_wait);
 static struct udp_bearer udp_bearers[MAX_IP_BEARERS];
+static struct socket *multicast_socket;
 static int udp_started;
 
 static struct tipc_media udp_media_info = {
@@ -84,26 +86,24 @@ static struct tipc_media udp_media_info = {
 	.priority	= TIPC_DEF_LINK_PRI,
 	.tolerance	= TIPC_DEF_LINK_TOL,
 	.window		= TIPC_DEF_LINK_WIN,
-	.type_id	= TIPC_MEDIA_TYPE_IP,
+	.type_id	= TIPC_MEDIA_TYPE_UDP,
 	.name		= "udp"
 };
 
 
 static void udp_media_addr_set(struct tipc_media_addr *a,
-			       struct sockaddr_in *sin)
+			       struct in_addr *addr)
 {
-	if(sin->sin_family != AF_INET) {
-	//TODO: ndisc code need to be updated for v6.
-	//the bearer level orig address field is too small
-	//tipc_media_addr_size also.	
-		pr_err("AF not supported\n");
-		return;
-	}
-	a->media_id = TIPC_MEDIA_TYPE_IP;
+	a->media_id = TIPC_MEDIA_TYPE_UDP;
 	//a should now contain:
 	//AF_INET/ipv4addr
-	memcpy(a->value, &sin->sin_addr.s_addr, sizeof(struct in_addr));
-	a->broadcast = ((sin->sin_addr.s_addr & 0xE0) == 0xE0);
+	memcpy(a->value, addr, sizeof(struct in_addr));
+	if (ipv4_is_multicast(addr)) {
+		printk("set bcast bit for address 0x%x\n", *addr);
+		a->broadcast = 1;
+	} else {
+		a->broadcast = 0;
+	}
 }
 struct udp_skb_meta{
 	struct tipc_media_addr *dest;
@@ -114,7 +114,13 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 		    struct tipc_media_addr *dest)
 {
 	struct udp_skb_meta *meta;
+	struct sk_buff *clone;
 
+	if (!udp_started) {
+		pr_err("tipc: udp is not started yet\n");
+		return 0;
+	}
+	clone = skb_clone(skb, GFP_ATOMIC);
 	spin_lock_bh(&send_queue.lock);
 	if (skb_queue_len(&send_queue) >= MAX_SEND_QUEUE) {
 		spin_unlock_bh(&send_queue.lock);
@@ -122,10 +128,10 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 		//TODO: set bearer congested/blocked
 		return 0;
 	}
-	meta = skb->cb;
+	meta = clone->cb;
 	meta->dest = dest;
 	meta->ub_ptr = tb_ptr->usr_handle;
-	__skb_queue_head(&send_queue, skb);
+	__skb_queue_head(&send_queue, clone);
 	spin_unlock_bh(&send_queue.lock);
 	wake_up_interruptible(&send_queue_wait);
 	return 0;
@@ -147,8 +153,6 @@ again:
 				 kthread_should_stop());
 	if(kthread_should_stop())
 		return 0;
-//	printk("tipc: woke up tipc_udp_send, got %d packets to send\n",
-//		skb_queue_len(&send_queue));
 
 	while (!skb_queue_empty(&send_queue)) {
 		memset(&msg,0,sizeof(struct msghdr));
@@ -163,26 +167,35 @@ again:
 		msg.msg_iov = &iov;
 		msg.msg_name = &dst;
 		msg.msg_namelen = sizeof(struct sockaddr_in);
-//		printk("send packet (%d bytes) to 0x%x\n", skb->len, 
-//			dst.sin_addr.s_addr);
-		err = kernel_sendmsg(meta->ub_ptr->socket, &msg, &iov, 1, skb->len);
-//		printk("sendmsg returned %d\n",err);
-		
+		if (ipv4_is_multicast(&dst.sin_addr.s_addr))
+			err = kernel_sendmsg(multicast_socket, &msg, &iov,
+					     1,skb->len);
+		else
+			err = kernel_sendmsg(meta->ub_ptr->socket, &msg, &iov,
+					     1, skb->len);
 		//TODO: When is skb freed?
 	}
 	goto again;
 }
 
-static void tipc_udp_recv(struct sock* sk, int bytes)
+static void tipc_udp_recv(struct sock *sk, int bytes)
 {
 	struct sk_buff *skb;
 	int err;
-	printk("sk data available\n");
 	skb = skb_recv_datagram(sk, 0, 1, &err);
 	if (err == -EAGAIN)
 		return;
-	printk("deliver to link layer\n");
+	skb_pull(skb, sizeof(struct udphdr));
+	print_hex_dump(KERN_DEBUG, "raw data: ", DUMP_PREFIX_ADDRESS, 
+	16, 1, skb->data, skb->len, true);
+	skb->next = NULL;
 	tipc_recv_msg(skb, udp_bearers[0].bearer);
+}
+static int tipc_udp_backlog_recv(struct sock *sk, struct sk_buff *skb)
+{
+	printk("backlog receive wtf is this?\n");
+	tipc_recv_msg(skb, udp_bearers[0].bearer);
+	return 0;
 }
 
 
@@ -198,32 +211,46 @@ static void enable_bearer_wh(struct work_struct *ws)
 	struct ip_mreq mreq;
 	struct sockaddr_in sin;
 	struct udp_bearer *ub_ptr;
+	static const int mloop = 0;
 	int err;
 	struct enable_bearer_work *work;
 
 	work = container_of(ws, struct enable_bearer_work, ws);
 	ub_ptr = work->ub_ptr;
+	if (!udp_started) { //TODO: break this out to a separate function
+		err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &multicast_socket);
+		BUG_ON(err);
+		memcpy(&mreq.imr_multiaddr.s_addr,
+		       &udp_media_info.bcast_addr.value,
+		       sizeof(struct in_addr));
+		mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+		err = kernel_setsockopt(multicast_socket, IPPROTO_IP,
+					IP_ADD_MEMBERSHIP,
+					(char*)&mreq, sizeof(mreq));
+		BUG_ON(err);
 
-//	err = sock_create_kern(AF_INET, SOCK_DGRAM, IPPROTO_UDP, &ub_ptr->socket);
+		err = kernel_setsockopt(multicast_socket, IPPROTO_IP,
+					IP_MULTICAST_LOOP, (char*) &mloop, sizeof(mloop));
+		BUG_ON(err);
+		sin.sin_family = AF_INET;
+		sin.sin_port = htons(TIPC_UDPPORT);
+		sin.sin_addr.s_addr = mreq.imr_multiaddr.s_addr;
+		err = kernel_bind(multicast_socket, (struct sockaddr*)&sin,
+			  	  sizeof(struct sockaddr_in));
+		BUG_ON(err);
+		multicast_socket->sk->sk_data_ready = tipc_udp_recv;
+		multicast_socket->sk->sk_backlog_rcv = tipc_udp_backlog_recv;
+	}
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->socket);
-
-
-	BUG_ON(err);
-	memcpy(&mreq.imr_multiaddr.s_addr, &udp_media_info.bcast_addr.value,
-	       sizeof(struct in_addr));
-	mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-	err = kernel_setsockopt(ub_ptr->socket, IPPROTO_IP,
-				IP_ADD_MEMBERSHIP, (char*)&mreq, sizeof(mreq));
 	BUG_ON(err);
 
 	err = kernel_bind(ub_ptr->socket, (struct sockaddr*)&work->addr,
 			  sizeof(struct sockaddr_in));
-	printk("bound addr\n");
 	BUG_ON(err);
 
 	ub_ptr->task_send = kthread_run(tipc_udp_send, NULL, "tipc_udp_send");
 	ub_ptr->socket->sk->sk_data_ready = tipc_udp_recv;
-//	ub_ptr->socket->sk->skbacklog_rcv = 
+	ub_ptr->socket->sk->sk_backlog_rcv = tipc_udp_backlog_recv;
 	udp_started = 1;
 	kfree(work);
 }
@@ -254,9 +281,10 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 	printk("schedule work\n");
 	schedule_work(&ws->ws);
 	tb_ptr->usr_handle = ub_ptr;
+	ub_ptr->bearer = tb_ptr;
 	tb_ptr->mtu = 1500;
 	tb_ptr->blocked = 0;
-	udp_media_addr_set(&tb_ptr->addr, &ws->addr);
+	udp_media_addr_set(&tb_ptr->addr, &ws->addr.sin_addr.s_addr);
 	
 //	ub_ptr->socket->sk->sk_data_ready = tipc_udp_recv;
 	//TODO: stringify macro on fn name
@@ -277,19 +305,7 @@ static void disable_bearer(struct tipc_bearer *tb_ptr)
 
 static int udp_addr2str(struct tipc_media_addr *a, char *buf, int size)
 {
-	struct sockaddr_in *sin;
-	char tmp[255];
-	sin = a->value;
-/*
-	if (inet_ntop(sin->sin_family, sin->sin_addr, tmp, 255) == NULL) {
-		pr_err("inet_ntop failed\n");
-		return 1; //TODO: -EINVAL??
-	}
-*/
-	snprintf(buf, size, "%pI4 port:%u", sin->sin_addr.s_addr,
-		 sin->sin_port);
-//	snprintf(buf, size, "%s port:%u",tmp, sin->sin_port);
-	printk("udp_addr2str( ) == %s\n",buf);
+	snprintf(buf, size, "%pI4", a->value);
 	return 0;
 }
 
@@ -302,8 +318,16 @@ static int udp_str2addr(struct tipc_media_addr *a, char *buf)
 
 static int udp_msg2addr(struct tipc_media_addr *a, char *msg_area)
 {
-	if (msg_area[TIPC_MEDIA_TYPE_OFFSET] != TIPC_MEDIA_TYPE_IP)
+        print_hex_dump(KERN_DEBUG, "msg_area[TIPC_MEDIA_TYPE_OFFSET] (+4) == ", DUMP_PREFIX_ADDRESS, 
+        16, 1, &(msg_area[TIPC_MEDIA_TYPE_OFFSET]), 4, true);
+
+	if (msg_area[TIPC_MEDIA_TYPE_OFFSET] != TIPC_MEDIA_TYPE_UDP){
+		printk("media addr != UDP\n");
 		return 1; //TODO: -EINVAL?
+	}
+        print_hex_dump(KERN_DEBUG, "msg_area+IP_ADDR_OFFSET] (+8) == ", DUMP_PREFIX_ADDRESS, 
+        16, 1, msg_area + IP_ADDR_OFFSET, 8, true);
+
 	//TODO:FIXME
 	udp_media_addr_set(a, msg_area + IP_ADDR_OFFSET);
 	return 0;
@@ -311,9 +335,9 @@ static int udp_msg2addr(struct tipc_media_addr *a, char *msg_area)
 
 static int udp_addr2msg(struct tipc_media_addr *a, char *msg_area)
 {
-	if (msg_area[TIPC_MEDIA_TYPE_OFFSET] != TIPC_MEDIA_TYPE_IP)
-		return 1;
-	udp_media_addr_set(a, msg_area + IP_ADDR_OFFSET);
+	memset(msg_area, 0, TIPC_MEDIA_ADDR_SIZE);
+	msg_area[TIPC_MEDIA_TYPE_OFFSET] = TIPC_MEDIA_TYPE_UDP;
+	memcpy(msg_area + IP_ADDR_OFFSET, a->value, sizeof(struct in_addr));
 	return 0;
 }
 
@@ -322,7 +346,7 @@ int tipc_udp_media_start(void)
 	int res;
 	res = in_aton(DEFAULT_MC_GROUP);
 	memcpy(&udp_media_info.bcast_addr.value, &res, sizeof(res));
-	udp_media_info.bcast_addr.media_id = TIPC_MEDIA_TYPE_IP;
+	udp_media_info.bcast_addr.media_id = TIPC_MEDIA_TYPE_UDP;
 	udp_media_info.bcast_addr.broadcast = 1;
 	//IP bearers use per-bearer multicast group instead	
 	res = tipc_register_media(&udp_media_info);

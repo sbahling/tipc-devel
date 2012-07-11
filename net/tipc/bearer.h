@@ -56,7 +56,7 @@
  * Identifiers of supported TIPC media types
  */
 #define TIPC_MEDIA_TYPE_ETH	1
-#define TIPC_MEDIA_TYPE_IP	2
+#define TIPC_MEDIA_TYPE_UDP	2
 
 /**
  * struct tipc_media_addr - destination address used by TIPC bearers

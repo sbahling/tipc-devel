@@ -58,6 +58,8 @@ struct udp_bearer {
 	struct tipc_bearer *bearer;
 	struct socket *socket;
 	struct task_struct *task_send;
+	struct sockaddr_in listen;
+	struct sockaddr_in ndisc;
 };
 
 static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
@@ -191,19 +193,13 @@ static void tipc_udp_recv(struct sock *sk, int bytes)
 	skb->next = NULL;
 	tipc_recv_msg(skb, udp_bearers[0].bearer);
 }
-static int tipc_udp_backlog_recv(struct sock *sk, struct sk_buff *skb)
-{
-	printk("backlog receive wtf is this?\n");
-	tipc_recv_msg(skb, udp_bearers[0].bearer);
-	return 0;
-}
-
 
 struct enable_bearer_work
 {
 	struct work_struct ws;
 	struct udp_bearer *ub_ptr;
 	struct sockaddr_in addr;
+	struct sockaddr_in ndisc;
 };
 
 static void enable_bearer_wh(struct work_struct *ws)
@@ -239,7 +235,6 @@ static void enable_bearer_wh(struct work_struct *ws)
 			  	  sizeof(struct sockaddr_in));
 		BUG_ON(err);
 		multicast_socket->sk->sk_data_ready = tipc_udp_recv;
-		multicast_socket->sk->sk_backlog_rcv = tipc_udp_backlog_recv;
 	}
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->socket);
 	BUG_ON(err);
@@ -250,9 +245,30 @@ static void enable_bearer_wh(struct work_struct *ws)
 
 	ub_ptr->task_send = kthread_run(tipc_udp_send, NULL, "tipc_udp_send");
 	ub_ptr->socket->sk->sk_data_ready = tipc_udp_recv;
-	ub_ptr->socket->sk->sk_backlog_rcv = tipc_udp_backlog_recv;
 	udp_started = 1;
 	kfree(work);
+}
+
+static void parse_udpargs(char *arg, char *addr, char *ndisc, __be16 *port)
+{
+	char *start;
+	char *end;
+	printk("arg= %s\n",arg);
+	start = strchr(arg, ':') + 1;
+	end = strchr(start, ':');
+	*end = 0;
+	strcpy(addr, start);
+	printk("parsed addr= %s\n",addr);
+	
+	start = end + 1;
+	end = strchr(start, ':');
+	*end = 0;
+	*port = simple_strtoull(start, NULL, 10);
+	printk("parsed and converted port= %u\n", *port);
+
+	start = end + 1;
+	strcpy(ndisc, start);
+	printk("parsed ndisc address = %s\n", ndisc);
 }
 
 static int enable_bearer(struct tipc_bearer *tb_ptr)
@@ -260,6 +276,8 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 	struct udp_bearer *ub_ptr = &udp_bearers[0];
 	struct enable_bearer_work *ws;
 	char addr[16];
+	char ndisc[16];
+	__be16	port = 0;
 	int ret;
 
 	printk("enable bearer:> %s\n",tb_ptr->name);
@@ -267,14 +285,29 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 	BUG_ON(!ws);
 	INIT_WORK(&ws->ws, enable_bearer_wh);
 
-	ret = sscanf(tb_ptr->name, "udp:%s", addr);
-	if (ret == 0)
-		goto fail;
-	ws->addr.sin_addr.s_addr = in_aton(addr);
+//	ret = sscanf(tb_ptr->name, "udp:%s:%hd:%s", addr, &port, ndisc);
+	parse_udpargs(tb_ptr->name, addr, ndisc, &port);
 
-	printk("addr: %s\n",addr);
+//	FIXME: store port and ndisc info in bearer
+/*
+	if (ret == 0) {
+		//TODO: try to fetch interface name after udp:
+		goto fail;
+	}
+*/
+	if (!port)
+		port = TIPC_UDPPORT;
+
 	ws->addr.sin_family = AF_INET;
-	ws->addr.sin_port = htons(TIPC_UDPPORT);
+	ws->addr.sin_addr.s_addr = in_aton(addr);
+	printk("addr: %s port: %u\n",addr, port);
+	ws->addr.sin_port = htons(port);
+
+	ws->ndisc.sin_family = AF_INET;
+	ws->ndisc.sin_addr.s_addr = in_aton(ndisc);
+	printk("ndisc: %s\n", ndisc);
+	ws->ndisc.sin_port = htons(port);
+
 	skb_queue_head_init(&send_queue);
 
 	ws->ub_ptr = ub_ptr;

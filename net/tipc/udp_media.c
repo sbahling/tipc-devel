@@ -42,6 +42,7 @@
 #include <linux/inet.h>
 #include <linux/kernel.h>
 #include <linux/kthread.h>
+#include <linux/list.h>
 
 #define DEFAULT_MC_GROUP "228.0.0.1"
 #define MAX_IP_BEARERS 1
@@ -60,6 +61,7 @@ struct udp_bearer {
 	struct socket *mcast;
 	struct task_struct *task_send;
 	struct sockaddr_in ndisc;
+	struct list_head next;
 };
 
 static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
@@ -73,7 +75,9 @@ static int udp_addr2msg(struct tipc_media_addr *a, char *msg_area);
 
 static struct sk_buff_head send_queue;
 static DECLARE_WAIT_QUEUE_HEAD(send_queue_wait);
-static struct udp_bearer udp_bearers[MAX_IP_BEARERS];
+//static struct udp_bearer udp_bearers[MAX_IP_BEARERS];
+static LIST_HEAD(bearer_list);
+
 static int udp_started;
 
 static struct tipc_media udp_media_info = {
@@ -96,12 +100,6 @@ static void udp_media_addr_set(struct tipc_media_addr *a,
 			       struct sockaddr_in *addr)
 {
 	a->media_id = TIPC_MEDIA_TYPE_UDP;
-	//a should now contain:
-	//AF_INET/ipv4addr
-/*
-	memcpy(a->value, &addr->sin_addr.s_addr, sizeof(struct in_addr));
-	memcpy(a->value + sizeof(struct in_addr), &addr->sin_port, sizeof(__be16));
-*/
 	memcpy(a->value, addr, sizeof(struct sockaddr_in));
         print_hex_dump(KERN_DEBUG, "udp_media_addr_set: ", DUMP_PREFIX_ADDRESS, 
         16, 1, a->value, sizeof(struct sockaddr_in), true);
@@ -114,7 +112,6 @@ static void udp_media_addr_set(struct tipc_media_addr *a,
 	}
 }
 struct udp_skb_meta{
-//	struct tipc_media_addr *dest;
 	struct sockaddr_in *dst;
 	struct udp_bearer *ub_ptr;
 };
@@ -128,8 +125,7 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 	struct tipc_media_addr *remote = dest;
 
 	ub_ptr = tb_ptr->usr_handle;
-	if(dest->broadcast == 1)
-	{
+	if(dest->broadcast == 1) {
 		/*ndisc/bearer code assumes ndisc to go out on a media addr.
 		workaround*/
 		remote = &ub_ptr->ndisc;
@@ -192,12 +188,14 @@ again:
 
 /*
 		if (ipv4_is_multicast(meta->dst->sin_addr.s_addr))
+*/
 			err = kernel_sendmsg(meta->ub_ptr->mcast, &msg, &iov,
 					     1,skb->len);
+/*
 		else
-*/
 			err = kernel_sendmsg(meta->ub_ptr->traffic, &msg, &iov,
 					     1, skb->len);
+*/
 		//TODO: When is skb freed?
 	}
 	goto again;
@@ -206,7 +204,9 @@ again:
 static void tipc_udp_recv(struct sock *sk, int bytes)
 {
 	struct sk_buff *skb;
+	struct udp_bearer *ub_ptr;
 	int err;
+
 	skb = skb_recv_datagram(sk, 0, 1, &err);
 	if (err == -EAGAIN)
 		return;
@@ -215,7 +215,12 @@ static void tipc_udp_recv(struct sock *sk, int bytes)
 	16, 1, skb->data, skb->len, true);
 	skb->next = NULL;
 	/*TODO: how to fetch bearer reference from sk????*/
-	tipc_recv_msg(skb, udp_bearers[0].bearer);
+	ub_ptr = sk->sk_user_data;
+	pr_debug("Packet receive,bearer ptr=0x%p bearer name: %s\n", 
+		 ub_ptr, ub_ptr->bearer->name);
+	BUG_ON(!ub_ptr);
+	
+	tipc_recv_msg(skb, ub_ptr->bearer);
 }
 
 struct enable_bearer_work
@@ -239,7 +244,8 @@ static void enable_bearer_wh(struct work_struct *ws)
 
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->mcast);
 	BUG_ON(err);
-
+	ub_ptr->mcast->sk->sk_user_data = ub_ptr;
+	pr_debug("set mcast sock private data = 0x%p\n", ub_ptr);
 	if (ipv4_is_multicast(ub_ptr->ndisc.sin_addr.s_addr)) {
 		pr_debug("joining multicast group\n");
 		memcpy(&mreq.imr_multiaddr.s_addr,
@@ -254,17 +260,22 @@ static void enable_bearer_wh(struct work_struct *ws)
 		err = kernel_setsockopt(ub_ptr->mcast, IPPROTO_IP,
 					IP_MULTICAST_LOOP, (char*) &mloop, sizeof(mloop));
 		BUG_ON(err);
+		err = kernel_bind(ub_ptr->mcast, (struct sockaddr*)&ub_ptr->ndisc,
+		  	  sizeof(struct sockaddr_in));
+		BUG_ON(err);
 
+
+	} else {
+		pr_info("unicast discovery mode\n");
 	}
 
-	err = kernel_bind(ub_ptr->mcast, (struct sockaddr*)&ub_ptr->ndisc,
-		  	  sizeof(struct sockaddr_in));
-	BUG_ON(err);
 	ub_ptr->mcast->sk->sk_data_ready = tipc_udp_recv;
 	listen = &ub_ptr->bearer->addr;
 
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->traffic);
 	BUG_ON(err);
+	ub_ptr->traffic->sk->sk_user_data = ub_ptr;
+	pr_debug("set traffic sock private data = 0x%p\n", ub_ptr);
 	pr_debug("bind listen socket: 0x%x, port %u\n", 
 		listen->sin_addr.s_addr, listen->sin_port);
 	err = kernel_bind(ub_ptr->traffic, (struct sockaddr*)listen,
@@ -278,10 +289,13 @@ static void enable_bearer_wh(struct work_struct *ws)
 
 static int parse_udpargs(char *arg, char *addr, char *ndisc, __be16 *port)
 {
+	char tmp[TIPC_MAX_BEARER_NAME];
 	char *start;
 	char *end;
+
 	pr_debug("arg= %s\n",arg);
-	start = strchr(arg, ':') + 1;
+	strncpy(tmp, arg, TIPC_MAX_BEARER_NAME);
+	start = strchr(tmp, ':') + 1;
 	end = strchr(start, ':');
 	if (end)
 		*end = 0;
@@ -306,13 +320,23 @@ static int parse_udpargs(char *arg, char *addr, char *ndisc, __be16 *port)
 
 static int enable_bearer(struct tipc_bearer *tb_ptr)
 {
-	struct udp_bearer *ub_ptr = &udp_bearers[0];
+//	struct udp_bearer *ub_ptr = &udp_bearers[0];
+	struct udp_bearer *ub_ptr;
 	struct enable_bearer_work *ws;
 	char addr[16];
 	char ndisc[16] = DEFAULT_MC_GROUP;
 	__be16	port = TIPC_UDPPORT;
 	struct sockaddr_in listen;
+	struct list_head *entry;
 	int ret;
+
+/*
+	list_for_each(entry, &bearer_list) {
+		ub_ptr = list_entry(entry, struct udp_bearer, next);
+	}
+*/
+	ub_ptr = kmalloc(sizeof(struct udp_bearer), GFP_ATOMIC);
+	BUG_ON(!ub_ptr);
 
 	parse_udpargs(tb_ptr->name, addr, ndisc, &port);
 	skb_queue_head_init(&send_queue);
@@ -343,6 +367,8 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 
 	pr_debug("schedule work\n");
 	schedule_work(&ws->ws);
+	pr_debug("add to list\n");
+	list_add_tail(&ub_ptr->next, &bearer_list);
 
 	return 0;
 }

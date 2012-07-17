@@ -43,6 +43,7 @@
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/list.h>
+#include <linux/inetdevice.h>
 
 #define DEFAULT_MC_GROUP "228.0.0.1"
 #define MAX_IP_BEARERS 1
@@ -103,11 +104,17 @@ static void udp_media_addr_set(struct tipc_media_addr *a,
 	memcpy(a->value, addr, sizeof(struct sockaddr_in));
         print_hex_dump(KERN_DEBUG, "udp_media_addr_set: ", DUMP_PREFIX_ADDRESS, 
         16, 1, a->value, sizeof(struct sockaddr_in), true);
+        print_hex_dump(KERN_DEBUG, "input sockaddr was: ", DUMP_PREFIX_ADDRESS, 
+        16, 1, addr, sizeof(struct sockaddr_in), true);
 
-	if (ipv4_is_multicast(addr->sin_addr.s_addr))
+
+	if (ipv4_is_multicast(addr->sin_addr.s_addr)){
+		printk("SET BROADCAST BIT FOR ADDR 0x%x\n",addr->sin_addr.s_addr);
 		a->broadcast = 1;
-	else 
+	}
+	else {
 		a->broadcast = 0;
+	}
 }
 struct udp_skb_meta{
 	struct sockaddr_in *dst;
@@ -145,7 +152,7 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 	        16, 1, remote, sizeof(struct sockaddr_in), true);
 
 	meta = (struct udp_skb_meta*)clone->cb;
-	meta->dst = (struct sockaddtr_in*)remote;
+	meta->dst = (struct sockaddr_in*)remote;
 	meta->ub_ptr = ub_ptr;
 	__skb_queue_head(&send_queue, clone);
 	spin_unlock_bh(&send_queue.lock);
@@ -172,13 +179,13 @@ again:
 	while (!skb_queue_empty(&send_queue)) {
 		memset(&msg,0,sizeof(struct msghdr));
 		skb = skb_dequeue_tail(&send_queue);
-		meta = skb->cb;
+		meta = (struct udp_skb_meta*) skb->cb;
 
 		print_hex_dump(KERN_DEBUG, "udp sendmsg to addr: ", DUMP_PREFIX_ADDRESS, 
 	        16, 1, meta->dst, sizeof(struct sockaddr_in), true);
 		iov.iov_base = skb->data;
 		iov.iov_len = skb->len;
-		msg.msg_iov = &iov;
+		msg.msg_iov = (struct iovec*) &iov;
 		msg.msg_name = meta->dst;
 		msg.msg_namelen = sizeof(struct sockaddr_in);
 		pr_debug("remote= 0x%x, port=%u\n",meta->dst->sin_addr.s_addr, meta->dst->sin_port);
@@ -234,7 +241,7 @@ static void enable_bearer_wh(struct work_struct *ws)
 	ub_ptr = work->ub_ptr;
 	kfree(work);
 
-	listen = &ub_ptr->bearer->addr;
+	listen = (struct sockaddr_in*) &ub_ptr->bearer->addr;
 
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->transmit);
 	BUG_ON(err);
@@ -246,7 +253,8 @@ static void enable_bearer_wh(struct work_struct *ws)
 		       &ub_ptr->discovery.sin_addr.s_addr,
 		       sizeof(struct in_addr));
 	 /*TODO: join only mcgroup on the interface that work->addr belongs to*/
-		mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+//		mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+		mreq.imr_interface.s_addr = listen->sin_addr.s_addr;
 		err = kernel_setsockopt(ub_ptr->transmit, IPPROTO_IP,
 					IP_ADD_MEMBERSHIP,
 					(char*)&mreq, sizeof(mreq));
@@ -281,11 +289,85 @@ static void enable_bearer_wh(struct work_struct *ws)
 	udp_started = 1;
 }
 
-static int parse_udpargs(char *arg, char *addr, char *ndisc, __be16 *port)
+static int validate_ipstr(char *ip)
+{
+	unsigned b1, b2, b3, b4;
+	unsigned char c;
+
+	if (sscanf(ip, "%3u.%3u.%3u.%3u%c", &b1, &b2, &b3, &b4, &c) != 4)
+		return -EINVAL;
+	if ((b1 | b2 | b3 | b4) > 255)
+		return -EINVAL;
+	if (strspn(ip, "0123456789.") < strlen(ip))
+		return -EINVAL;
+	return 1;
+}
+
+static int getopt(char *str, char **opt)
+{
+	int x;
+	char *end;
+	
+	if(*str == '\0')
+		return 0;
+	*opt = str;
+	end = strchr(str, ':');
+	if (end)
+		*end = '\0';
+	return strlen(*opt) + 1;
+}
+static const char *tipc_udpport = "8152";
+static const char *tipc_mc_default = "228.0.0.1";
+
+static int get_udpopts(char *arg, struct sockaddr_in *listen, struct sockaddr_in *transmit)
+{
+	char *opt = NULL;
+	char str[TIPC_MAX_BEARER_NAME];
+	unsigned long port;
+	int len;
+
+
+	printk("get opts: %s\n",arg);
+
+	listen->sin_family = AF_INET;
+	transmit->sin_family = AF_INET;
+	strncpy(str, arg, TIPC_MAX_BEARER_NAME);
+	/*Skip media name*/
+	len += getopt(str, &opt);
+	printk(" got opt %s \n",opt);
+	/*Get the listening address*/
+	len += getopt(str + len, &opt);
+	printk(" got opt %s \n",opt);
+	if (validate_ipstr(opt) == -EINVAL)
+		return -EINVAL;
+	listen->sin_addr.s_addr = in_aton(opt);
+
+	/*Optionally get the port (defaults to tipc_udpport)*/
+	opt = tipc_udpport;
+	len += getopt(str + len, &opt);
+	printk(" got opt %s \n",opt);
+	port = simple_strtoul(opt, NULL, 10);
+	if (0 == port || port > 65535)
+		return -EINVAL;
+	listen->sin_port = htons(port);
+	transmit->sin_port = htons(port);
+
+	/*Optionally get the discovery address (defaults to tipc_mc_default)*/
+	opt = tipc_mc_default;
+	len += getopt(str + len, &opt);
+	printk(" got opt %s \n",opt);
+	if (validate_ipstr(opt) == -EINVAL)
+		return -EINVAL;
+	transmit->sin_addr.s_addr = in_aton(opt);
+	return 0;
+}
+/*
+static int parse_udpargs(char *arg, char *addr, char *ndisc, __be16 *port_p)
 {
 	char tmp[TIPC_MAX_BEARER_NAME];
 	char *start;
 	char *end;
+	unsigned long port;
 
 	pr_debug("arg= %s\n",arg);
 	strncpy(tmp, arg, TIPC_MAX_BEARER_NAME);
@@ -294,50 +376,66 @@ static int parse_udpargs(char *arg, char *addr, char *ndisc, __be16 *port)
 	if (end)
 		*end = 0;
 	strcpy(addr, start);
-	pr_debug("parsed addr= %s\n",addr);
+	if (validate_ipstr(start) == -EINVAL)
+		return -EINVAL;
+	pr_debug("parsed addr= %s\n",start);
 	if (!end)
-		return 0;
-
+		return 1;
 	start = end + 1;
 	end = strchr(start, ':');
 	if (end)
 		*end = 0;
-	*port = simple_strtoull(start, NULL, 10);
-	pr_debug("parsed and converted port= %u\n", *port);
+	port = simple_strtoul(start, NULL, 10);
+	if (0 == port || port > 65535)
+		return -EINVAL;
+	*port_p = port;
+	pr_debug("parsed and converted port= %u\n", *port_p);
 	if (!end)
-		return 0;
+		return 1;
 
 	start = end + 1;
 	strcpy(ndisc, start);
-	pr_debug("parsed ndisc address = %s\n", ndisc);
+	if (validate_ipstr(start) == -EINVAL)
+		return -EINVAL;
+	pr_debug("parsed ndisc address = %s\n", start);
+	return 1;
 }
-
+*/
 static int enable_bearer(struct tipc_bearer *tb_ptr)
 {
-//	struct udp_bearer *ub_ptr = &udp_bearers[0];
 	struct udp_bearer *ub_ptr;
 	struct enable_bearer_work *ws;
 	char addr[16];
 	char ndisc[16] = DEFAULT_MC_GROUP;
 	__be16	port = TIPC_UDPPORT;
 	struct sockaddr_in listen;
-	struct list_head *entry;
-	int ret;
 
-/*
-	list_for_each(entry, &bearer_list) {
-		ub_ptr = list_entry(entry, struct udp_bearer, next);
-	}
-*/
 	ub_ptr = kmalloc(sizeof(struct udp_bearer), GFP_ATOMIC);
 	BUG_ON(!ub_ptr);
+/*
+	if (parse_udpargs(tb_ptr->name, addr, ndisc, &port) == -EINVAL) {
+		kfree(ub_ptr);
+		return -EINVAL;
+	}
+*/
 
-	parse_udpargs(tb_ptr->name, addr, ndisc, &port);
+	if (get_udpopts(tb_ptr->name, &listen, &ub_ptr->discovery) == -EINVAL) {
+		pr_debug("failed to parse udp options\n");
+		kfree(ub_ptr);
+		return -EINVAL;
+	}
+
+	if(!ip_dev_find(&init_net, listen.sin_addr.s_addr)){
+		pr_err("Invalid address\n");
+			return -ENODEV;
+	}
+
 	skb_queue_head_init(&send_queue);
 	tb_ptr->usr_handle = ub_ptr;
 	ub_ptr->bearer = tb_ptr;
 	tb_ptr->mtu = 1500;
 	tb_ptr->blocked = 0;
+/*
 	ub_ptr->discovery.sin_family = AF_INET;
 	ub_ptr->discovery.sin_addr.s_addr = in_aton(ndisc);
 	ub_ptr->discovery.sin_port = htons(port);
@@ -345,10 +443,9 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 	listen.sin_family = AF_INET;
 	listen.sin_addr.s_addr = in_aton(addr);
 	listen.sin_port = htons(port);
-
 	pr_debug("listen: %s port: %u\n",addr, port);
 	pr_debug("ndisc: %s port: %u\n", ndisc, port);
-
+*/
 	pr_debug("enable bearer:> %s\n",tb_ptr->name);
 	ws = kmalloc(sizeof(struct enable_bearer_work), GFP_ATOMIC);
 	BUG_ON(!ws);
@@ -391,27 +488,17 @@ static int udp_str2addr(struct tipc_media_addr *a, char *buf)
 
 static int udp_msg2addr(struct tipc_media_addr *a, char *msg_area)
 {
-//	struct sockaddr_in sin;
-        print_hex_dump(KERN_DEBUG, "msg_area[TIPC_MEDIA_TYPE_OFFSET] (+4) == ", 
-				DUMP_PREFIX_ADDRESS, 
-			        16, 1, &(msg_area[TIPC_MEDIA_TYPE_OFFSET]), 4, true);
+	struct sockaddr_in *sin;
+
+	sin = (struct sockaddr_in*) (msg_area + IP_ADDR_OFFSET);
 
 	if (msg_area[TIPC_MEDIA_TYPE_OFFSET] != TIPC_MEDIA_TYPE_UDP){
 		pr_debug("media addr != UDP\n");
 		return 1; //TODO: -EINVAL?
 	}
-
-        print_hex_dump(KERN_DEBUG, "msg_area+IP_ADDR_OFFSET] (+8) == ", DUMP_PREFIX_ADDRESS, 
-        16, 1, msg_area + IP_ADDR_OFFSET, 8, true);
-
-	udp_media_addr_set(a,msg_area+IP_ADDR_OFFSET);
-
-	//TODO:FIXME
-//	sin.sin_family = AF_INET;
-//	memcpy(&sin.sin_addr.s_addr, msg_area + IP_ADDR_OFFSET, sizeof(struct in_addr));
-//	memcpy(&sin.sin_port, msg_area + IP_ADDR_OFFSET + sizeof(struct in_addr), sizeof(__be16));
-//	udp_media_addr_set(a, msg_area + IP_ADDR_OFFSET);
-//	udp_media_addr_set(a, &sin);
+        print_hex_dump(KERN_DEBUG, "conv sockaddr:== ", DUMP_PREFIX_ADDRESS, 
+        16, 1,  sin, sizeof(struct sockaddr_in), true);
+	udp_media_addr_set(a, sin);
 	return 0;
 }
 

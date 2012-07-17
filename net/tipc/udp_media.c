@@ -45,13 +45,10 @@
 #include <linux/list.h>
 #include <linux/inetdevice.h>
 
-#define DEFAULT_MC_GROUP "228.0.0.1"
 #define MAX_IP_BEARERS 1
 #define IP_STR_MAX 64
 #define IP_ADDR_OFFSET	4
-#define TIPC_UDPPORT 2048
 #define MAX_SEND_QUEUE 256
-
 
 /**
  *
@@ -63,6 +60,7 @@ struct udp_bearer {
 	struct task_struct *task_send;
 	struct sockaddr_in discovery;
 	struct list_head next;
+	struct work_struct work;
 };
 
 static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
@@ -79,6 +77,8 @@ static DECLARE_WAIT_QUEUE_HEAD(send_queue_wait);
 //static struct udp_bearer udp_bearers[MAX_IP_BEARERS];
 static LIST_HEAD(bearer_list);
 
+static const char *tipc_udpport = "8152";
+static const char *tipc_mc_default = "228.0.0.1";
 static int udp_started;
 
 static struct tipc_media udp_media_info = {
@@ -175,7 +175,6 @@ again:
 				 kthread_should_stop());
 	if(kthread_should_stop())
 		return 0;
-
 	while (!skb_queue_empty(&send_queue)) {
 		memset(&msg,0,sizeof(struct msghdr));
 		skb = skb_dequeue_tail(&send_queue);
@@ -189,8 +188,6 @@ again:
 		msg.msg_name = meta->dst;
 		msg.msg_namelen = sizeof(struct sockaddr_in);
 		pr_debug("remote= 0x%x, port=%u\n",meta->dst->sin_addr.s_addr, meta->dst->sin_port);
-
-
 		err = kernel_sendmsg(meta->ub_ptr->transmit, &msg, &iov,
 					     1,skb->len);
 		if (unlikely(err < 0))
@@ -222,38 +219,38 @@ static void tipc_udp_recv(struct sock *sk, int bytes)
 	tipc_recv_msg(skb, ub_ptr->bearer);
 }
 
-struct enable_bearer_work
-{
-	struct work_struct ws;
-	struct udp_bearer *ub_ptr;
-};
-
-static void enable_bearer_wh(struct work_struct *ws)
+/**
+ * enable_bearer_wh - deferred udp bearer initialization
+ * @work:	work struct holding the udp bearer pointer
+ * 
+ * create and initialize the listen and transmit udp sockets
+ */
+static void enable_bearer_wh(struct work_struct *work)
 {
 	struct ip_mreq mreq;
 	struct sockaddr_in *listen;
 	struct udp_bearer *ub_ptr;
 	static const int mloop = 0;
 	int err;
-	struct enable_bearer_work *work;
 
-	work = container_of(ws, struct enable_bearer_work, ws);
-	ub_ptr = work->ub_ptr;
-	kfree(work);
-
+	ub_ptr = container_of(work, struct udp_bearer, work);
 	listen = (struct sockaddr_in*) &ub_ptr->bearer->addr;
-
+	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->listen);
+	BUG_ON(err);
+	pr_debug("set traffic sock private data = 0x%p\n", ub_ptr);
+	pr_debug("bind listen socket: 0x%x, port %u\n", 
+		listen->sin_addr.s_addr, listen->sin_port);
+	err = kernel_bind(ub_ptr->listen, (struct sockaddr*)listen,
+			  sizeof(struct sockaddr_in));
+	BUG_ON(err);
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->transmit);
 	BUG_ON(err);
-	ub_ptr->transmit->sk->sk_user_data = ub_ptr;
 	pr_debug("set mcast sock private data = 0x%p\n", ub_ptr);
 	if (ipv4_is_multicast(ub_ptr->discovery.sin_addr.s_addr)) {
 		pr_debug("joining multicast group\n");
 		memcpy(&mreq.imr_multiaddr.s_addr,
 		       &ub_ptr->discovery.sin_addr.s_addr,
 		       sizeof(struct in_addr));
-	 /*TODO: join only mcgroup on the interface that work->addr belongs to*/
-//		mreq.imr_interface.s_addr = htonl(INADDR_ANY);
 		mreq.imr_interface.s_addr = listen->sin_addr.s_addr;
 		err = kernel_setsockopt(ub_ptr->transmit, IPPROTO_IP,
 					IP_ADD_MEMBERSHIP,
@@ -266,29 +263,20 @@ static void enable_bearer_wh(struct work_struct *ws)
 				  (struct sockaddr*)&ub_ptr->discovery,
 		  		  sizeof(struct sockaddr_in));
 		BUG_ON(err);
-
-
 	} else {
 		pr_info("unicast discovery mode\n");
 	}
-
 	ub_ptr->transmit->sk->sk_data_ready = tipc_udp_recv;
-
-	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->listen);
-	BUG_ON(err);
-	ub_ptr->listen->sk->sk_user_data = ub_ptr;
-	pr_debug("set traffic sock private data = 0x%p\n", ub_ptr);
-	pr_debug("bind listen socket: 0x%x, port %u\n", 
-		listen->sin_addr.s_addr, listen->sin_port);
-	err = kernel_bind(ub_ptr->listen, (struct sockaddr*)listen,
-			  sizeof(struct sockaddr_in));
-	BUG_ON(err);
-
-	ub_ptr->task_send = kthread_run(tipc_udp_send, NULL, "tipc_udp_send");
 	ub_ptr->listen->sk->sk_data_ready = tipc_udp_recv;
+	ub_ptr->transmit->sk->sk_user_data = ub_ptr;
+	ub_ptr->listen->sk->sk_user_data = ub_ptr;
+	ub_ptr->task_send = kthread_run(tipc_udp_send, NULL, "tipc_udp_send");
 	udp_started = 1;
 }
 
+/**
+ *
+ */
 static int validate_ipstr(char *ip)
 {
 	unsigned b1, b2, b3, b4;
@@ -303,9 +291,16 @@ static int validate_ipstr(char *ip)
 	return 1;
 }
 
+/**
+ * getopt - deconstruct colon separated parameter string
+ * @str:	parameter string
+ * @opt:	output parameter
+ * 
+ * opt is set to the first parameter value in str
+ * returns the length of opt, including \0
+ */
 static int getopt(char *str, char **opt)
 {
-	int x;
 	char *end;
 	
 	if(*str == '\0')
@@ -316,108 +311,71 @@ static int getopt(char *str, char **opt)
 		*end = '\0';
 	return strlen(*opt) + 1;
 }
-static const char *tipc_udpport = "8152";
-static const char *tipc_mc_default = "228.0.0.1";
 
-static int get_udpopts(char *arg, struct sockaddr_in *listen, struct sockaddr_in *transmit)
+/**
+ * get_udpopts - parse udp bearer configuration
+ * @arg:	bearer configuration string (==name)
+ * @local:	output struct holding local ip/port
+ * @remote:	output struct holding remote ip/port
+ */
+static int get_udpopts(char *arg, struct sockaddr_in *local, struct sockaddr_in *remote)
 {
 	char *opt = NULL;
 	char str[TIPC_MAX_BEARER_NAME];
 	unsigned long port;
-	int len;
+	int len = 0;
 
-
-	printk("get opts: %s\n",arg);
-
-	listen->sin_family = AF_INET;
-	transmit->sin_family = AF_INET;
+	local->sin_family = AF_INET;
+	remote->sin_family = AF_INET;
 	strncpy(str, arg, TIPC_MAX_BEARER_NAME);
 	/*Skip media name*/
 	len += getopt(str, &opt);
-	printk(" got opt %s \n",opt);
-	/*Get the listening address*/
+	/*Get the local address*/
 	len += getopt(str + len, &opt);
-	printk(" got opt %s \n",opt);
 	if (validate_ipstr(opt) == -EINVAL)
 		return -EINVAL;
-	listen->sin_addr.s_addr = in_aton(opt);
+	local->sin_addr.s_addr = in_aton(opt);
 
-	/*Optionally get the port (defaults to tipc_udpport)*/
+	/*Optionally get the local port, or use default*/
 	opt = tipc_udpport;
 	len += getopt(str + len, &opt);
-	printk(" got opt %s \n",opt);
 	port = simple_strtoul(opt, NULL, 10);
 	if (0 == port || port > 65535)
 		return -EINVAL;
-	listen->sin_port = htons(port);
-	transmit->sin_port = htons(port);
+	local->sin_port = htons(port);
 
-	/*Optionally get the discovery address (defaults to tipc_mc_default)*/
+	/*Optionally get the discovery address, or use default*/
 	opt = tipc_mc_default;
 	len += getopt(str + len, &opt);
-	printk(" got opt %s \n",opt);
 	if (validate_ipstr(opt) == -EINVAL)
 		return -EINVAL;
-	transmit->sin_addr.s_addr = in_aton(opt);
-	return 0;
-}
-/*
-static int parse_udpargs(char *arg, char *addr, char *ndisc, __be16 *port_p)
-{
-	char tmp[TIPC_MAX_BEARER_NAME];
-	char *start;
-	char *end;
-	unsigned long port;
+	remote->sin_addr.s_addr = in_aton(opt);
 
-	pr_debug("arg= %s\n",arg);
-	strncpy(tmp, arg, TIPC_MAX_BEARER_NAME);
-	start = strchr(tmp, ':') + 1;
-	end = strchr(start, ':');
-	if (end)
-		*end = 0;
-	strcpy(addr, start);
-	if (validate_ipstr(start) == -EINVAL)
-		return -EINVAL;
-	pr_debug("parsed addr= %s\n",start);
-	if (!end)
-		return 1;
-	start = end + 1;
-	end = strchr(start, ':');
-	if (end)
-		*end = 0;
-	port = simple_strtoul(start, NULL, 10);
+	/*Optionally get the remote port, or use default*/
+	opt = tipc_udpport;
+	len += getopt(str + len, &opt);
+	port = simple_strtoul(opt, NULL, 10);
 	if (0 == port || port > 65535)
 		return -EINVAL;
-	*port_p = port;
-	pr_debug("parsed and converted port= %u\n", *port_p);
-	if (!end)
-		return 1;
+	remote->sin_port = htons(port);
 
-	start = end + 1;
-	strcpy(ndisc, start);
-	if (validate_ipstr(start) == -EINVAL)
-		return -EINVAL;
-	pr_debug("parsed ndisc address = %s\n", start);
-	return 1;
+	return 0;
 }
-*/
+
+/**
+ * enable_bearer - callback to create a new udp bearer instance
+ * @tb_ptr:	pointer to generic tipc_bearer
+ *
+ * validate the bearer parameters and perform basic initialization of the 
+ * udp_bearer, the kernel socket setup is deferred
+ */
 static int enable_bearer(struct tipc_bearer *tb_ptr)
 {
 	struct udp_bearer *ub_ptr;
-	struct enable_bearer_work *ws;
-	char addr[16];
-	char ndisc[16] = DEFAULT_MC_GROUP;
-	__be16	port = TIPC_UDPPORT;
 	struct sockaddr_in listen;
 
 	ub_ptr = kmalloc(sizeof(struct udp_bearer), GFP_ATOMIC);
 	BUG_ON(!ub_ptr);
-/*
-	if (parse_udpargs(tb_ptr->name, addr, ndisc, &port) == -EINVAL) {
-		kfree(ub_ptr);
-		return -EINVAL;
-	}
-*/
 
 	if (get_udpopts(tb_ptr->name, &listen, &ub_ptr->discovery) == -EINVAL) {
 		pr_debug("failed to parse udp options\n");
@@ -435,29 +393,15 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 	ub_ptr->bearer = tb_ptr;
 	tb_ptr->mtu = 1500;
 	tb_ptr->blocked = 0;
-/*
-	ub_ptr->discovery.sin_family = AF_INET;
-	ub_ptr->discovery.sin_addr.s_addr = in_aton(ndisc);
-	ub_ptr->discovery.sin_port = htons(port);
-
-	listen.sin_family = AF_INET;
-	listen.sin_addr.s_addr = in_aton(addr);
-	listen.sin_port = htons(port);
-	pr_debug("listen: %s port: %u\n",addr, port);
-	pr_debug("ndisc: %s port: %u\n", ndisc, port);
-*/
 	pr_debug("enable bearer:> %s\n",tb_ptr->name);
-	ws = kmalloc(sizeof(struct enable_bearer_work), GFP_ATOMIC);
-	BUG_ON(!ws);
-	INIT_WORK(&ws->ws, enable_bearer_wh);
-	ws->ub_ptr = ub_ptr;
+	INIT_WORK(&ub_ptr->work, enable_bearer_wh);
 
 	print_hex_dump(KERN_DEBUG, "enable bearer addr: ", DUMP_PREFIX_ADDRESS, 
 	16, 1, &listen, sizeof(struct sockaddr_in), true);
 	udp_media_addr_set(&tb_ptr->addr, &listen);
 
 	pr_debug("schedule work\n");
-	schedule_work(&ws->ws);
+	schedule_work(&ub_ptr->work);
 	pr_debug("add to list\n");
 	list_add_tail(&ub_ptr->next, &bearer_list);
 
@@ -521,20 +465,15 @@ static int udp_addr2msg(struct tipc_media_addr *a, char *msg_area)
 	memset(msg_area, 0, TIPC_MEDIA_ADDR_SIZE);
 	msg_area[TIPC_MEDIA_TYPE_OFFSET] = TIPC_MEDIA_TYPE_UDP;
 	memcpy(msg_area + IP_ADDR_OFFSET, a->value, sizeof(struct sockaddr_in));
-//	memcpy(msg_area + IP_ADDR_OFFSET, a->value, sizeof(struct in_addr) + sizeof(__be16));
-//	memcpy(msg_area + IP_ADDR_OFFSET, &ub->ndisc.sin_addr.s_addr, sizeof(struct in_addr));
-//	memcpy(msg_area + IP_ADDR_OFFSET + sizeof(struct in_addr), &ub->ndisc.sin_port, sizeof(__be16));
 	return 0;
 }
 
 int tipc_udp_media_start(void)
 {
 	int res;
-	res = in_aton(DEFAULT_MC_GROUP);
-	/*Dont fill in bcast_addr.value, this is bearer specific for UDP*/
+	/*Dont fill in bcast_addr.value, this is bearer specific for IP/UDP*/
 	udp_media_info.bcast_addr.media_id = TIPC_MEDIA_TYPE_UDP;
 	udp_media_info.bcast_addr.broadcast = 1;
-	//IP bearers use per-bearer multicast group instead	
 	res = tipc_register_media(&udp_media_info);
 	if (res)
 		return res;

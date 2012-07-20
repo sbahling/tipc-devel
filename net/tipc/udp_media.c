@@ -49,6 +49,9 @@
 #define IP_STR_MAX 64
 #define IP_ADDR_OFFSET	4
 #define MAX_SEND_QUEUE 256
+#define UDP_PORT_BASE	50000
+#define UDP_MCAST_PREFIX "228.0."
+extern int tipc_net_id;
 
 /**
  * struct udp_bearer - 
@@ -82,8 +85,6 @@ static struct sk_buff_head send_queue;
 static DECLARE_WAIT_QUEUE_HEAD(send_queue_wait);
 static LIST_HEAD(bearer_list);
 static struct task_struct *task_send;
-static const char *tipc_udpport = "8152";
-static const char *tipc_mc_default = "228.0.0.1";
 static int udp_started;
 
 static struct tipc_media udp_media_info = {
@@ -176,9 +177,6 @@ again:
 		msg.msg_name = cb->dst;
 		msg.msg_namelen = sizeof(struct sockaddr_in);
 		pr_debug("remote= 0x%x, port=%u\n",cb->dst->sin_addr.s_addr, cb->dst->sin_port);
-		err = 0;
-		while(err < 100000000)
-			err++;
 		err = kernel_sendmsg(cb->ub_ptr->transmit, &msg, &iov,
 					     1,skb->len);
 		if (unlikely(err < 0))
@@ -230,6 +228,7 @@ static void enable_bearer_wh(struct work_struct *work)
 	err = kernel_bind(ub_ptr->listen, (struct sockaddr*)listen,
 			  sizeof(struct sockaddr_in));
 	WARN_ON(err);
+
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->transmit);
 	BUG_ON(err);
 
@@ -297,7 +296,7 @@ static int getopt(char *str, char **opt)
 
 /**
  * get_udpopts - parse udp bearer configuration
- * @arg:	bearer configuration string (==name)
+ * @arg:	bearer configuration string, including media name
  * @local:	output struct holding local ip/port
  * @remote:	output struct holding remote ip/port
  */
@@ -305,8 +304,10 @@ static int get_udpopts(char *arg, struct sockaddr_in *local, struct sockaddr_in 
 {
 	char *opt = NULL;
 	char str[TIPC_MAX_BEARER_NAME];
+	int i;
 	unsigned long port;
 	int len = 0;
+	char opt_default[16];
 
 	local->sin_family = AF_INET;
 	remote->sin_family = AF_INET;
@@ -320,26 +321,32 @@ static int get_udpopts(char *arg, struct sockaddr_in *local, struct sockaddr_in 
 	local->sin_addr.s_addr = in_aton(opt);
 
 	/*Optionally get the local port, or use default*/
-	opt = tipc_udpport;
-	len += getopt(str + len, &opt);
-	port = simple_strtoul(opt, NULL, 10);
-	if (0 == port || port > 65535)
-		return -EINVAL;
+	port = UDP_PORT_BASE + tipc_net_id;
+	if (i = getopt(str + len, &opt)) {
+		port = simple_strtoul(opt, NULL, 10);
+		if (port == 0 || port > 65535)
+			return -EINVAL;
+		len += i;
+	}
 	local->sin_port = htons(port);
 
-	/*Optionally get the discovery address, or use default*/
-	opt = tipc_mc_default;
+	/*Optionally get the discovery address,
+	  or use generated one based on network id*/
+	sprintf(opt_default, UDP_MCAST_PREFIX"%u.%u",
+		(tipc_net_id >> 8), (tipc_net_id & 0xFF));
+	opt = opt_default;
 	len += getopt(str + len, &opt);
 	if (validate_ipstr(opt) == -EINVAL)
 		return -EINVAL;
 	remote->sin_addr.s_addr = in_aton(opt);
 
 	/*Optionally get the remote port, or use default*/
-	opt = tipc_udpport;
-	len += getopt(str + len, &opt);
-	port = simple_strtoul(opt, NULL, 10);
-	if (0 == port || port > 65535)
-		return -EINVAL;
+	port = UDP_PORT_BASE + tipc_net_id;
+	if (i = getopt(str + len, &opt)) {
+		port = simple_strtoul(opt, NULL, 10);
+		if (0 == port || port > 65535)
+			return -EINVAL;
+	}
 	remote->sin_port = htons(port);
 
 	return 0;

@@ -127,22 +127,21 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 	struct tipc_media_addr *remote = dest;
 
 	ub_ptr = tb_ptr->usr_handle;
+	if (!atomic_read(&ub_ptr->enabled)) {
+		pr_err("tipc: udp bearer is not started yet\n");
+		return -ENODEV;
+	}
 	/*The ndisc/bearer code assumes that tipc bcast packets go out on a 
 	  media specific addr, point it to a bearer specific one instead*/
 	if(dest->broadcast == 1)
 		remote =(struct tipc_media_addr*) &ub_ptr->discovery;
-
-	if (!atomic_read(&ub_ptr->enabled)) {
-		pr_err("tipc: udp bearer is not started yet\n");
-		return 0;
-	}
 	clone = skb_clone(skb, GFP_ATOMIC);
 	spin_lock_bh(&send_queue.lock);
 	if (skb_queue_len(&send_queue) >= MAX_SEND_QUEUE) {
 		spin_unlock_bh(&send_queue.lock);
 		pr_debug("tipc: udp send buffer overrun, block bearer\n");
 		tb_ptr->blocked = 1;
-		return 0;
+		return -EAGAIN;
 	}
 	memcpy(TIPC_UDP_DST(clone), remote, sizeof(struct sockaddr_in));
 	TIPC_UDP_BEARER(clone) = ub_ptr;
@@ -178,7 +177,7 @@ again:
 		if (unlikely(err < 0))
 			pr_err("sendmsg on bearer %s failed with %d\n",
 			       TIPC_UDP_BEARER(skb)->bearer->name, err);
-		//TODO: When is skb freed?
+		kfree_skb(skb);
 	}
 	goto again;
 }
@@ -359,37 +358,28 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 {
 	struct udp_bearer *ub_ptr;
 	struct sockaddr_in listen;
+	struct net_device *dev;
 
 	ub_ptr = kmalloc(sizeof(struct udp_bearer), GFP_ATOMIC);
 	BUG_ON(!ub_ptr);
 
 	if (get_udpopts(tb_ptr->name, &listen, &ub_ptr->discovery) == -EINVAL) {
-		pr_debug("failed to parse udp options\n");
 		kfree(ub_ptr);
 		return -EINVAL;
 	}
-	if(!ip_dev_find(&init_net, listen.sin_addr.s_addr)){
-		pr_err("Invalid address\n");
-			return -ENODEV;
-	}
+	dev = ip_dev_find(&init_net, listen.sin_addr.s_addr);
+	if (!dev)
+		return -ENODEV;
 
 	atomic_set(&ub_ptr->enabled, 0);
 	tb_ptr->usr_handle = ub_ptr;
 	ub_ptr->bearer = tb_ptr;
-	tb_ptr->mtu = 1500;
+	tb_ptr->mtu = dev->mtu;
 	tb_ptr->blocked = 0;
-	pr_debug("enable bearer:> %s\n",tb_ptr->name);
-	INIT_WORK(&ub_ptr->work, enable_bearer_wh);
-
-	print_hex_dump(KERN_DEBUG, "enable bearer addr: ", DUMP_PREFIX_ADDRESS, 
-	16, 1, &listen, sizeof(struct sockaddr_in), true);
 	udp_media_addr_set(&tb_ptr->addr, &listen);
-
-	pr_debug("schedule work\n");
+	INIT_WORK(&ub_ptr->work, enable_bearer_wh);
 	schedule_work(&ub_ptr->work);
-	pr_debug("add to list\n");
 	list_add_tail(&ub_ptr->next, &bearer_list);
-
 	return 0;
 }
 
@@ -398,7 +388,6 @@ static void cleanup_bearer(struct work_struct *work)
 	struct udp_bearer *ub_ptr;
 
 	ub_ptr = container_of(work, struct udp_bearer, work);
-	ub_ptr->bearer = NULL;
 	sock_release(ub_ptr->listen);
 	sock_release(ub_ptr->transmit);
 	kfree(ub_ptr);
@@ -427,8 +416,7 @@ static int udp_msg2addr(struct tipc_media_addr *a, char *msg_area)
 	sin = (struct sockaddr_in*) (msg_area + IP_ADDR_OFFSET);
 
 	if (msg_area[TIPC_MEDIA_TYPE_OFFSET] != TIPC_MEDIA_TYPE_UDP){
-		pr_debug("media addr != UDP\n");
-		return 1; //TODO: -EINVAL?
+		return -EINVAL;
 	}
 	udp_media_addr_set(a, sin);
 	return 0;

@@ -2002,6 +2002,7 @@ static void link_recv_proto_msg(struct tipc_link *l_ptr, struct sk_buff *buf)
 	u32 max_pkt_info;
 	u32 max_pkt_ack;
 	u32 msg_tol;
+	char *remote;
 	struct tipc_msg *msg = buf_msg(buf);
 
 	if (link_blocked(l_ptr))
@@ -2039,8 +2040,8 @@ static void link_recv_proto_msg(struct tipc_link *l_ptr, struct sk_buff *buf)
 		/* fall thru' */
 	case ACTIVATE_MSG:
 		/* Update link settings according other endpoint's values */
-		strcpy((strrchr(l_ptr->name, ':') + 1), (char *)msg_data(msg));
-
+		remote = strchr(l_ptr->name, '-');
+		strcpy((strchr(remote, ':') + 1), (char *)msg_data(msg));
 		msg_tol = msg_link_tolerance(msg);
 		if (msg_tol > l_ptr->tolerance)
 			link_set_supervision_props(l_ptr, msg_tol);

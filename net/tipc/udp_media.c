@@ -446,7 +446,7 @@ int tipc_udp_media_start(void)
 {
 	int res;
 
-	if (!atomic_read(&udp_started))
+	if (atomic_read(&udp_started))
 		return -EINVAL;
 	/*Dont fill in bcast_addr.value, this is bearer specific for IP/UDP*/
 	udp_media_info.bcast_addr.media_id = TIPC_MEDIA_TYPE_UDP;

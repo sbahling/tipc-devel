@@ -177,7 +177,7 @@ again:
 		if (unlikely(err < 0))
 			pr_err("sendmsg on bearer %s failed with %d\n",
 			       TIPC_UDP_BEARER(skb)->bearer->name, err);
-		kfree_skb(skb);
+		consume_skb(skb);
 	}
 	goto again;
 }
@@ -199,7 +199,7 @@ static void tipc_udp_recv(struct sock *sk, int bytes)
 	if (atomic_read(&ub_ptr->enabled))
 		tipc_recv_msg(skb, ub_ptr->bearer);
 	else
-		kfree_skb(skb);
+		consume_skb(skb);
 }
 
 /**
@@ -374,7 +374,7 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 	atomic_set(&ub_ptr->enabled, 0);
 	tb_ptr->usr_handle = ub_ptr;
 	ub_ptr->bearer = tb_ptr;
-	tb_ptr->mtu = dev->mtu;
+	tb_ptr->mtu = dev->mtu - sizeof(struct iphdr) - sizeof(struct udphdr);
 	tb_ptr->blocked = 0;
 	udp_media_addr_set(&tb_ptr->addr, &listen);
 	INIT_WORK(&ub_ptr->work, enable_bearer_wh);

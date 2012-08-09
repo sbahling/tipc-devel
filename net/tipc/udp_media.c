@@ -41,7 +41,7 @@
 #include <linux/udp.h>
 #include <linux/inet.h>
 #include <linux/kernel.h>
-#include <linux/kthread.h>
+#include <linux/workqueue.h>
 #include <linux/list.h>
 #include <linux/inetdevice.h>
 
@@ -49,14 +49,14 @@
 #define MAX_SEND_QUEUE 256
 #define UDP_PORT_BASE	50000
 #define UDP_MCAST_PREFIX "228.0."
-#define TIPC_UDP_CB(skb)	(*(struct udp_skb_parms*)&((skb)->cb))
-#define TIPC_UDP_BEARER(skb)	(TIPC_UDP_CB(skb).ub_ptr)
-#define TIPC_UDP_DST(skb)	(&TIPC_UDP_CB(skb).dst)
+
 extern int tipc_net_id;
 
 struct udp_skb_parms{
+	struct work_struct work;
 	struct sockaddr_in dst;
 	struct udp_bearer *ub_ptr;
+	struct sk_buff *skb;
 };
 
 /**
@@ -86,10 +86,8 @@ static int udp_addr2str(struct tipc_media_addr *a, char *buf, int size);
 static int udp_msg2addr(struct tipc_media_addr *a, char *msg_area);
 static int udp_addr2msg(struct tipc_media_addr *a, char *msg_area);
 
-static struct sk_buff_head send_queue;
-static DECLARE_WAIT_QUEUE_HEAD(send_queue_wait);
 static LIST_HEAD(bearer_list);
-static struct task_struct *task_send;
+static struct workqueue_struct *send_wq;
 static atomic_t udp_started;
 
 static struct tipc_media udp_media_info = {
@@ -119,12 +117,39 @@ static void udp_media_addr_set(struct tipc_media_addr *a,
 		a->broadcast = 0;
 }
 
+static void tipc_udp_send(struct work_struct *work)
+{
+	struct msghdr msg;
+	struct kvec iov;
+	struct sk_buff *skb;
+	struct udp_skb_parms *parms;
+	int err;
+
+	memset(&msg,0,sizeof(struct msghdr));
+	parms = (struct udp_skb_parms*) container_of(work, struct udp_skb_parms,
+						     work);
+	skb = parms->skb;
+	iov.iov_base = skb->data;
+	iov.iov_len = skb->len;
+	msg.msg_iov = (struct iovec*) &iov;
+	msg.msg_name = &parms->dst;
+	msg.msg_namelen = sizeof(struct sockaddr_in);
+	err = kernel_sendmsg(parms->ub_ptr->transmit, &msg,
+			     &iov, 1,skb->len);
+	if (unlikely(err < 0))
+		pr_err("sendmsg on bearer %s failed with %d\n",
+		       parms->ub_ptr->bearer->name, err);
+	kfree(parms);
+	consume_skb(skb);
+}
+
 static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 		    struct tipc_media_addr *dest)
 {
 	struct udp_bearer *ub_ptr;
 	struct sk_buff *clone;
 	struct tipc_media_addr *remote = dest;
+	struct udp_skb_parms *parms;
 
 	ub_ptr = tb_ptr->usr_handle;
 	if (!atomic_read(&ub_ptr->enabled)) {
@@ -136,50 +161,19 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 	if(dest->broadcast == 1)
 		remote =(struct tipc_media_addr*) &ub_ptr->discovery;
 	clone = skb_clone(skb, GFP_ATOMIC);
-	spin_lock_bh(&send_queue.lock);
-	if (skb_queue_len(&send_queue) >= MAX_SEND_QUEUE) {
-		spin_unlock_bh(&send_queue.lock);
-		pr_debug("tipc: udp send buffer overrun, block bearer\n");
-		tb_ptr->blocked = 1;
-		return -EAGAIN;
-	}
-	memcpy(TIPC_UDP_DST(clone), remote, sizeof(struct sockaddr_in));
-	TIPC_UDP_BEARER(clone) = ub_ptr;
-	__skb_queue_head(&send_queue, clone);
-	spin_unlock_bh(&send_queue.lock);
-	wake_up_interruptible(&send_queue_wait);
+
+	parms = kmalloc(sizeof(struct udp_skb_parms), GFP_ATOMIC);
+	BUG_ON(!parms);
+
+	INIT_WORK(&parms->work, tipc_udp_send);
+	/*Ndisc code uses temporary stack allocated media_addr, 
+	  so we must copy it before deferring */
+	memcpy(&parms->dst, remote, sizeof(struct sockaddr_in));
+	parms->ub_ptr = ub_ptr;
+	parms->skb = clone;
+
+	queue_work(send_wq, &parms->work);
 	return 0;
-}
-
-static int tipc_udp_send(void *param)
-{
-	struct msghdr msg;
-	struct kvec iov;
-	struct sk_buff *skb;
-	int err;
-
-again:
-	wait_event_interruptible(send_queue_wait,
-				 !skb_queue_empty(&send_queue) ||
-				 kthread_should_stop());
-	if(kthread_should_stop())
-		return 0;
-	while (!skb_queue_empty(&send_queue)) {
-		memset(&msg,0,sizeof(struct msghdr));
-		skb = skb_dequeue_tail(&send_queue);
-		iov.iov_base = skb->data;
-		iov.iov_len = skb->len;
-		msg.msg_iov = (struct iovec*) &iov;
-		msg.msg_name = TIPC_UDP_DST(skb);
-		msg.msg_namelen = sizeof(struct sockaddr_in);
-		err = kernel_sendmsg(TIPC_UDP_BEARER(skb)->transmit, &msg,
-				     &iov, 1,skb->len);
-		if (unlikely(err < 0))
-			pr_err("sendmsg on bearer %s failed with %d\n",
-			       TIPC_UDP_BEARER(skb)->bearer->name, err);
-		consume_skb(skb);
-	}
-	goto again;
 }
 
 static void tipc_udp_recv(struct sock *sk, int bytes)
@@ -414,7 +408,6 @@ static int udp_msg2addr(struct tipc_media_addr *a, char *msg_area)
 	struct sockaddr_in *sin;
 
 	sin = (struct sockaddr_in*) (msg_area + IP_ADDR_OFFSET);
-
 	if (msg_area[TIPC_MEDIA_TYPE_OFFSET] != TIPC_MEDIA_TYPE_UDP){
 		return -EINVAL;
 	}
@@ -442,18 +435,19 @@ int tipc_udp_media_start(void)
 	res = tipc_register_media(&udp_media_info);
 	if (res)
 		return res;
-	skb_queue_head_init(&send_queue);
-	task_send = kthread_run(tipc_udp_send, NULL, "tipc_udp_send");
-	if (IS_ERR(task_send))
-		return PTR_ERR(task_send);
+
+	send_wq = alloc_workqueue("tipc_udp_send", 0, 0);
+	if (IS_ERR(send_wq))
+		return PTR_ERR(send_wq);
+
 	atomic_set(&udp_started, 1);
 	return res;
 }
 
 void tipc_udp_media_stop(void)
 {
-	int err;
-
-	err = kthread_stop(task_send);
-	WARN_ON(err);
+	if (atomic_read(&udp_started))
+		return;
+	destroy_workqueue(send_wq);
+	atomic_set(&udp_started, 0);
 }

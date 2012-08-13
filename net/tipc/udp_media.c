@@ -46,7 +46,6 @@
 #include <linux/inetdevice.h>
 
 #define IP_ADDR_OFFSET	4
-#define MAX_SEND_QUEUE 256
 #define UDP_PORT_BASE	50000
 #define UDP_MCAST_PREFIX "228.0."
 
@@ -152,18 +151,16 @@ static int send_msg(struct sk_buff *skb, struct tipc_bearer *tb_ptr,
 	struct udp_skb_parms *parms;
 
 	ub_ptr = tb_ptr->usr_handle;
-	if (!atomic_read(&ub_ptr->enabled)) {
-		pr_err("tipc: udp bearer is not started yet\n");
+	if (!atomic_read(&ub_ptr->enabled))
 		return -ENODEV;
-	}
 	/*The ndisc/bearer code assumes that tipc bcast packets go out on a 
 	  media specific addr, point it to a bearer specific one instead*/
-	if(dest->broadcast == 1)
+	if(dest->broadcast)
 		remote =(struct tipc_media_addr*) &ub_ptr->discovery;
 	clone = skb_clone(skb, GFP_ATOMIC);
-
 	parms = kmalloc(sizeof(struct udp_skb_parms), GFP_ATOMIC);
-	BUG_ON(!parms);
+	if (!parms || !clone)
+		return -ENOMEM;
 
 	INIT_WORK(&parms->work, tipc_udp_send);
 	/*Ndisc code uses temporary stack allocated media_addr, 
@@ -196,6 +193,30 @@ static void tipc_udp_recv(struct sock *sk, int bytes)
 		consume_skb(skb);
 }
 
+static void init_mcast_bearer(struct sockaddr_in *ifaddr,
+			      struct udp_bearer *ub_ptr)
+{
+	struct ip_mreq mreq;
+	static const int mloop = 0;
+	int err;
+
+	memcpy(&mreq.imr_multiaddr.s_addr,
+	       &ub_ptr->discovery.sin_addr.s_addr,
+	       sizeof(struct in_addr));
+	mreq.imr_interface.s_addr = ifaddr->sin_addr.s_addr;
+	err = kernel_setsockopt(ub_ptr->transmit, IPPROTO_IP,
+				IP_ADD_MEMBERSHIP,
+				(char*)&mreq, sizeof(mreq));
+	WARN_ON(err);
+	err = kernel_setsockopt(ub_ptr->transmit, IPPROTO_IP,
+				IP_MULTICAST_LOOP, (char*) &mloop, sizeof(mloop));
+	WARN_ON(err);
+	err = kernel_bind(ub_ptr->transmit,
+			  (struct sockaddr*)&ub_ptr->discovery,
+	  		  sizeof(struct sockaddr_in));
+	WARN_ON(err);
+}
+
 /**
  * enable_bearer_wh - deferred udp bearer initialization
  * @work:	work struct holding the udp bearer pointer
@@ -220,24 +241,9 @@ static void enable_bearer_wh(struct work_struct *work)
 
 	err = sock_create_kern(AF_INET, SOCK_DGRAM, 0, &ub_ptr->transmit);
 	BUG_ON(err);
+	if (ipv4_is_multicast(ub_ptr->discovery.sin_addr.s_addr))
+		init_mcast_bearer(listen, ub_ptr);
 
-	if (ipv4_is_multicast(ub_ptr->discovery.sin_addr.s_addr)) {
-		memcpy(&mreq.imr_multiaddr.s_addr,
-		       &ub_ptr->discovery.sin_addr.s_addr,
-		       sizeof(struct in_addr));
-		mreq.imr_interface.s_addr = listen->sin_addr.s_addr;
-		err = kernel_setsockopt(ub_ptr->transmit, IPPROTO_IP,
-					IP_ADD_MEMBERSHIP,
-					(char*)&mreq, sizeof(mreq));
-		WARN_ON(err);
-		err = kernel_setsockopt(ub_ptr->transmit, IPPROTO_IP,
-					IP_MULTICAST_LOOP, (char*) &mloop, sizeof(mloop));
-		WARN_ON(err);
-		err = kernel_bind(ub_ptr->transmit,
-				  (struct sockaddr*)&ub_ptr->discovery,
-		  		  sizeof(struct sockaddr_in));
-		WARN_ON(err);
-	}
 	ub_ptr->transmit->sk->sk_data_ready = tipc_udp_recv;
 	ub_ptr->listen->sk->sk_data_ready = tipc_udp_recv;
 	ub_ptr->transmit->sk->sk_user_data = ub_ptr;

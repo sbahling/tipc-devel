@@ -45,9 +45,9 @@
 #include <linux/list.h>
 #include <linux/inetdevice.h>
 
-#define IP_ADDR_OFFSET	4
-#define UDP_PORT_BASE	50000
-#define UDP_MCAST_PREFIX "228.0."
+#define IP_ADDR_OFFSET		4
+#define UDP_PORT_DEFAULT	6118
+#define UDP_MCAST_PREFIX	"228.0."
 
 extern int tipc_net_id;
 
@@ -316,7 +316,7 @@ static int get_udpopts(char *arg, struct sockaddr_in *local, struct sockaddr_in 
 	local->sin_addr.s_addr = in_aton(opt);
 
 	/*Optionally get the local port, or use default*/
-	port = UDP_PORT_BASE + tipc_net_id;
+	port = UDP_PORT_DEFAULT;
 	if ((i = getopt(str + len, &opt))) {
 		port = simple_strtoul(opt, NULL, 10);
 		if (port == 0 || port > 65535)
@@ -336,7 +336,7 @@ static int get_udpopts(char *arg, struct sockaddr_in *local, struct sockaddr_in 
 	remote->sin_addr.s_addr = in_aton(opt);
 
 	/*Optionally get the remote port, or use default*/
-	port = UDP_PORT_BASE + tipc_net_id;
+	port = UDP_PORT_DEFAULT;
 	if ((i = getopt(str + len, &opt))) {
 		port = simple_strtoul(opt, NULL, 10);
 		if (0 == port || port > 65535)

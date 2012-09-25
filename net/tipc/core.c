@@ -39,6 +39,7 @@
 #include "name_table.h"
 #include "subscr.h"
 #include "config.h"
+#include "tipc_diag.h"
 
 #include <linux/module.h>
 
@@ -110,6 +111,7 @@ static void tipc_core_stop(void)
 	tipc_nametbl_stop();
 	tipc_ref_table_stop();
 	tipc_socket_stop();
+	tipc_diag_exit();
 }
 
 /**
@@ -134,6 +136,8 @@ static int tipc_core_start(void)
 		res = tipc_netlink_start();
 	if (!res)
 		res = tipc_socket_init();
+	if (!res)
+		res = tipc_diag_init();
 	if (res)
 		tipc_core_stop();
 

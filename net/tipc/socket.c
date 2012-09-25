@@ -46,16 +46,6 @@
 #define OVERLOAD_LIMIT_BASE	10000
 #define CONN_TIMEOUT_DEFAULT	8000	/* default connect timeout = 8s */
 
-struct tipc_sock {
-	struct sock sk;
-	struct tipc_port *p;
-	struct tipc_portid peer_name;
-	unsigned int conn_timeout;
-};
-
-#define tipc_sk(sk) ((struct tipc_sock *)(sk))
-#define tipc_sk_port(sk) (tipc_sk(sk)->p)
-
 #define tipc_rx_ready(sock) (!skb_queue_empty(&sock->sk->sk_receive_queue) || \
 			(sock->state == SS_DISCONNECTING))
 

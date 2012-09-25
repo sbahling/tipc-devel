@@ -37,6 +37,8 @@
 #ifndef _TIPC_PORT_H
 #define _TIPC_PORT_H
 
+#include <net/sock.h>
+
 #include "ref.h"
 #include "net.h"
 #include "msg.h"
@@ -74,6 +76,15 @@ typedef void (*tipc_conn_msg_event) (void *usr_handle, u32 portref,
 		unsigned int size);
 
 typedef void (*tipc_continue_event) (void *usr_handle, u32 portref);
+
+struct tipc_sock {
+        struct sock sk;
+        struct tipc_port *p;
+        struct tipc_portid peer_name;
+        unsigned int conn_timeout;
+};
+#define tipc_sk(sk) ((struct tipc_sock *)(sk))
+#define tipc_sk_port(sk) (tipc_sk(sk)->p)
 
 /**
  * struct user_port - TIPC user port (used with native API)
@@ -153,6 +164,8 @@ struct tipc_port {
 extern spinlock_t tipc_port_list_lock;
 struct tipc_port_list;
 
+
+int tipc_diag_dump(struct sk_buff *skb, struct netlink_callback *cb);
 /*
  * TIPC port manipulation routines
  */

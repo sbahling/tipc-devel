@@ -206,4 +206,31 @@ struct sockaddr_tipc {
 #define TIPC_NODE_RECVQ_DEPTH	131	/* Default: none (read only) */
 #define TIPC_SOCK_RECVQ_DEPTH	132	/* Default: none (read only) */
 
+/*
+ * Diag
+ */
+struct tipc_diag_req {
+	__u8 tdiag_family;
+	__u8 tdiag_protocol;
+	__u16 pad;
+};
+
+struct tipc_diag_msg {
+	__u8 tdiag_family;
+	__u8 tdiag_type;
+	char tdiag_state;
+	__u8 tdiag_cong;
+	__u8 tdiag_probe;
+	char pad[3];
+	__u32 tdiag_ino;
+	__u32 tdiag_uid;
+	__u32 tdiag_rqueue;
+	__u32 tdiag_wqueue;
+	struct tipc_portid tdiag_local;
+	struct tipc_portid tdiag_remote;
+	struct tipc_name tdiag_name;
+	__u32 tdiag_cookie[2];
+};
+
+
 #endif

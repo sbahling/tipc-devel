@@ -38,6 +38,9 @@
 #include "config.h"
 #include "port.h"
 #include "name_table.h"
+#include "tipc_diag.h"
+#include <linux/netlink.h>
+#include <net/sock.h>
 
 /* Connection management: */
 #define PROBING_INTERVAL 3600000	/* [ms] => 1 h */
@@ -67,6 +70,40 @@ static u32 port_peernode(struct tipc_port *p_ptr)
 static u32 port_peerport(struct tipc_port *p_ptr)
 {
 	return msg_destport(&p_ptr->phdr);
+}
+
+int tipc_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
+{
+	struct tipc_diag_req *req;
+	struct tipc_port *p_ptr;
+	struct sock *sk;
+	struct net *net;
+	int res;
+
+	req = NLMSG_DATA(cb->nlh);
+	net = sock_net(skb->sk);
+	p_ptr = (struct tipc_port *) cb->args[0];
+	spin_lock(&tipc_port_list_lock);
+	if (!p_ptr)
+		p_ptr = list_first_entry(&ports, struct tipc_port, port_list);
+
+	list_for_each_entry_from(p_ptr, &ports, port_list) {
+		sk = (struct sock *)p_ptr->usr_handle;
+		if (sk && net_eq(sock_net(sk), net)) {
+			tipc_port_lock(p_ptr->ref);
+			res = sk_diag_dump(sk, skb, req,
+				     NETLINK_CB(cb->skb).portid,
+				     cb->nlh->nlmsg_seq,
+				     NLM_F_MULTI);
+			tipc_port_unlock(p_ptr);
+			if (res < 0)
+				goto done;
+		}
+	}
+done:
+	spin_unlock(&tipc_port_list_lock);
+	cb->args[0] = (long) p_ptr;
+	return skb->len;
 }
 
 /**

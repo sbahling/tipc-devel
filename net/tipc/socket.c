@@ -1472,7 +1472,7 @@ static int accept(struct socket *sock, struct socket *new_sock, int flags)
 		u32 new_ref = new_tport->ref;
 		struct tipc_msg *msg = buf_msg(buf);
 
-		lock_sock(new_sk);
+		lock_sock_nested(new_sk, SINGLE_DEPTH_NESTING);
 
 		/*
 		 * Reject any stray messages received by new socket

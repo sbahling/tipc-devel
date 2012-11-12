@@ -45,23 +45,10 @@
 
 #define OVERLOAD_LIMIT_BASE	5000
 #define CONN_TIMEOUT_DEFAULT	8000	/* default connect timeout = 8s */
-
-struct tipc_sock {
-	struct sock sk;
-	struct tipc_port *p;
-	struct tipc_portid peer_name;
-	unsigned int conn_timeout;
-};
-
-#define tipc_sk(sk) ((struct tipc_sock *)(sk))
-#define tipc_sk_port(sk) (tipc_sk(sk)->p)
-
 #define tipc_rx_ready(sock) (!skb_queue_empty(&sock->sk->sk_receive_queue) || \
 			(sock->state == SS_DISCONNECTING))
 
 static int backlog_rcv(struct sock *sk, struct sk_buff *skb);
-static u32 dispatch(struct tipc_port *tport, struct sk_buff *buf);
-static void wakeupdispatch(struct tipc_port *tport);
 static void tipc_data_ready(struct sock *sk, int len);
 static void tipc_write_space(struct sock *sk);
 
@@ -180,7 +167,8 @@ static int tipc_create(struct net *net, struct socket *sock, int protocol,
 	socket_state state;
 	struct sock *sk;
 	struct tipc_port *tp_ptr;
-
+	int err;
+	
 	/* Validate arguments */
 	if (unlikely(protocol != 0))
 		return -EPROTONOSUPPORT;
@@ -208,24 +196,23 @@ static int tipc_create(struct net *net, struct socket *sock, int protocol,
 	if (sk == NULL)
 		return -ENOMEM;
 
-	/* Allocate TIPC port for socket to use */
-	tp_ptr = tipc_createport(sk, &dispatch, &wakeupdispatch,
-				     TIPC_LOW_IMPORTANCE);
-	if (unlikely(!tp_ptr)) {
-		sk_free(sk);
-		return -ENOMEM;
-	}
-
-	/* Finish initializing socket data structures */
+	/* Finish initializing socket/port data structures */
 	sock->ops = ops;
 	sock->state = state;
-
 	sock_init_data(sock, sk);
+	if (sk->sk_prot->init) {
+		err = sk->sk_prot->init(sk);
+		if (err) {
+			sk_common_release(sk);
+			return err;
+		}
+	}
+
 	sk->sk_backlog_rcv = backlog_rcv;
 	sk->sk_data_ready = tipc_data_ready;
 	sk->sk_write_space = tipc_write_space;
 	sk->sk_rcvbuf = TIPC_FLOW_CONTROL_WIN * 2 * TIPC_MAX_USER_MSG_SIZE * 2;
-	tipc_sk(sk)->p = tp_ptr;
+	tp_ptr = tipc_sk_port(sk);
 	tipc_sk(sk)->conn_timeout = CONN_TIMEOUT_DEFAULT;
 
 	spin_unlock_bh(tp_ptr->lock);
@@ -261,7 +248,6 @@ static int release(struct socket *sock)
 	struct tipc_port *tport;
 	struct sk_buff *buf;
 	int res;
-
 	/*
 	 * Exit if socket isn't fully initialized (occurs when a failed accept()
 	 * releases a pre-allocated child socket that was never used)
@@ -293,12 +279,18 @@ static int release(struct socket *sock)
 		}
 	}
 
+	//TODO: replace all this with a call to sk_common_release(sk);
+	//need to fix hash/unhash functions for this to work i think..
+
 	/*
-	 * Delete TIPC port; this ensures no more messages are queued
+	 * Deleting the TIPC port ensures no more messages are queued
 	 * (also disconnects an active connection & sends a 'FIN-' to peer)
 	 */
-	res = tipc_deleteport(tport->ref);
-
+	if (sk->sk_prot->destroy) {
+		sk->sk_prot->destroy(sk);
+	}
+	sock_orphan(sk);
+	sk_refcnt_debug_release(sk);
 	/* Discard any remaining (connection-based) messages in receive queue */
 	discard_rx_queue(sk);
 
@@ -382,7 +374,7 @@ static int get_name(struct socket *sock, struct sockaddr *uaddr,
 		addr->addr.id.ref = tsock->peer_name.ref;
 		addr->addr.id.node = tsock->peer_name.node;
 	} else {
-		addr->addr.id.ref = tsock->p->ref;
+		addr->addr.id.ref = tsock->p.ref;
 		addr->addr.id.node = tipc_own_addr;
 	}
 
@@ -789,8 +781,8 @@ static int auto_connect(struct socket *sock, struct tipc_msg *msg)
 
 	tsock->peer_name.ref = msg_origport(msg);
 	tsock->peer_name.node = msg_orignode(msg);
-	tipc_connect2port(tsock->p->ref, &tsock->peer_name);
-	tipc_set_portimportance(tsock->p->ref, msg_importance(msg));
+	tipc_connect2port(tsock->p.ref, &tsock->peer_name);
+	tipc_set_portimportance(tsock->p.ref, msg_importance(msg));
 	sock->state = SS_CONNECTED;
 	return 0;
 }
@@ -1293,7 +1285,7 @@ static int backlog_rcv(struct sock *sk, struct sk_buff *buf)
  *
  * Returns TIPC error status code (TIPC_OK if message is not to be rejected)
  */
-static u32 dispatch(struct tipc_port *tport, struct sk_buff *buf)
+u32 dispatch(struct tipc_port *tport, struct sk_buff *buf)
 {
 	struct sock *sk = (struct sock *)tport->usr_handle;
 	u32 res;
@@ -1324,7 +1316,7 @@ static u32 dispatch(struct tipc_port *tport, struct sk_buff *buf)
  *
  * Called with port lock already taken.
  */
-static void wakeupdispatch(struct tipc_port *tport)
+void wakeupdispatch(struct tipc_port *tport)
 {
 	struct sock *sk = (struct sock *)tport->usr_handle;
 
@@ -1503,7 +1495,7 @@ static int accept(struct socket *sock, struct socket *new_sock, int flags)
 	if (!res) {
 		struct sock *new_sk = new_sock->sk;
 		struct tipc_sock *new_tsock = tipc_sk(new_sk);
-		struct tipc_port *new_tport = new_tsock->p;
+		struct tipc_port *new_tport = &(new_tsock->p);
 		u32 new_ref = new_tport->ref;
 		struct tipc_msg *msg = buf_msg(buf);
 
@@ -1812,7 +1804,10 @@ static const struct net_proto_family tipc_family_ops = {
 static struct proto tipc_proto = {
 	.name		= "TIPC",
 	.owner		= THIS_MODULE,
-	.obj_size	= sizeof(struct tipc_sock)
+	.obj_size	= sizeof(struct tipc_sock),
+	.slab_flags	= SLAB_DESTROY_BY_RCU,
+	.init		= tipc_init_sock,
+	.destroy	= tipc_destroy_sock
 };
 
 /**

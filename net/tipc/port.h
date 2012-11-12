@@ -37,6 +37,7 @@
 #ifndef _TIPC_PORT_H
 #define _TIPC_PORT_H
 
+#include <net/sock.h>
 #include "ref.h"
 #include "net.h"
 #include "msg.h"
@@ -98,23 +99,27 @@ struct tipc_port {
 	struct tipc_node_subscr subscription;
 };
 
+struct tipc_sock {
+	struct sock sk;
+	struct tipc_port p;
+	struct tipc_portid peer_name;
+	unsigned int conn_timeout;
+};
+
+#define tipc_sk(sk) ((struct tipc_sock *)(sk))
+#define tipc_sk_port(sk) (&(tipc_sk(sk)->p))
+
 extern spinlock_t tipc_port_list_lock;
 struct tipc_port_list;
 
 /*
  * TIPC port manipulation routines
  */
-struct tipc_port *tipc_createport(void *usr_handle,
-		u32 (*dispatcher)(struct tipc_port *, struct sk_buff *),
-		void (*wakeup)(struct tipc_port *), const u32 importance);
-
 int tipc_reject_msg(struct sk_buff *buf, u32 err);
 
 int tipc_send_buf_fast(struct sk_buff *buf, u32 destnode);
 
 void tipc_acknowledge(u32 port_ref, u32 ack);
-
-int tipc_deleteport(u32 portref);
 
 int tipc_portimportance(u32 portref, unsigned int *importance);
 int tipc_set_portimportance(u32 portref, unsigned int importance);
@@ -197,5 +202,9 @@ static inline int tipc_port_congested(struct tipc_port *p_ptr)
 {
 	return (p_ptr->sent - p_ptr->acked) >= (TIPC_FLOW_CONTROL_WIN * 2);
 }
+void wakeupdispatch(struct tipc_port *tport);
+u32 dispatch(struct tipc_port *tport, struct sk_buff *buf);
 
+int tipc_init_sock(struct sock *sk);
+void tipc_destroy_sock(struct sock *sk);
 #endif

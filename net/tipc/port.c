@@ -65,6 +65,74 @@ static u32 port_peerport(struct tipc_port *p_ptr)
 	return msg_destport(&p_ptr->phdr);
 }
 
+
+int tipc_init_sock(struct sock *sk)
+{
+	struct tipc_port *p_ptr;
+	struct tipc_msg *msg;
+	u32 ref;
+	p_ptr = tipc_sk_port(sk);
+	ref = tipc_ref_acquire(p_ptr, &p_ptr->lock);
+	if (!ref) {
+		pr_warn("Port creation failed, ref. table exhausted\n");
+		kfree(p_ptr);
+		return -ENOMEM;
+	}
+
+	p_ptr->usr_handle = sk;
+	p_ptr->max_pkt = MAX_PKT_DEFAULT;
+	p_ptr->ref = ref;
+	INIT_LIST_HEAD(&p_ptr->wait_list);
+	INIT_LIST_HEAD(&p_ptr->subscription.nodesub_list);
+	p_ptr->dispatcher = dispatch;
+	p_ptr->wakeup = wakeupdispatch;
+	k_init_timer(&p_ptr->timer, (Handler)port_timeout, ref);
+	INIT_LIST_HEAD(&p_ptr->publications);
+	INIT_LIST_HEAD(&p_ptr->port_list);
+	/*
+	* Must hold port list lock while initializing message header template
+	* to ensure a change to node's own network address doesn't result
+	* in template containing out-dated network address information
+	*/
+	spin_lock_bh(&tipc_port_list_lock);
+	msg = &p_ptr->phdr;
+	tipc_msg_init(msg, TIPC_LOW_IMPORTANCE, TIPC_NAMED_MSG, NAMED_H_SIZE, 0);
+	msg_set_origport(msg, ref);
+	list_add_tail(&p_ptr->port_list, &ports);
+	spin_unlock_bh(&tipc_port_list_lock);
+	return 0;
+}
+
+void tipc_destroy_sock(struct sock *sk)
+{
+	struct tipc_port *p_ptr;
+	struct sk_buff *buf = NULL;
+	
+	p_ptr = tipc_sk_port(sk);
+	tipc_withdraw(p_ptr->ref, 0, NULL);
+	p_ptr = tipc_port_lock(p_ptr->ref);
+
+	if (!p_ptr)
+		return;
+
+	tipc_ref_discard(p_ptr->ref);
+	tipc_port_unlock(p_ptr);
+
+	k_cancel_timer(&p_ptr->timer);
+	if (p_ptr->connected) {
+		buf = port_build_peer_abort_msg(p_ptr, TIPC_ERR_NO_PORT);
+		tipc_nodesub_unsubscribe(&p_ptr->subscription);
+	}
+
+	spin_lock_bh(&tipc_port_list_lock);
+	list_del(&p_ptr->port_list);
+	list_del(&p_ptr->wait_list);
+	spin_unlock_bh(&tipc_port_list_lock);
+	k_term_timer(&p_ptr->timer);
+	if(buf)
+		tipc_net_route_msg(buf);
+}
+
 /**
  * tipc_port_peer_msg - verify message was sent by connected port's peer
  *
@@ -199,86 +267,6 @@ void tipc_port_recv_mcast(struct sk_buff *buf, struct tipc_port_list *dp)
 exit:
 	kfree_skb(buf);
 	tipc_port_list_free(dp);
-}
-
-/**
- * tipc_createport - create a generic TIPC port
- *
- * Returns pointer to (locked) TIPC port, or NULL if unable to create it
- */
-struct tipc_port *tipc_createport(void *usr_handle,
-			u32 (*dispatcher)(struct tipc_port *, struct sk_buff *),
-			void (*wakeup)(struct tipc_port *),
-			const u32 importance)
-{
-	struct tipc_port *p_ptr;
-	struct tipc_msg *msg;
-	u32 ref;
-
-	p_ptr = kzalloc(sizeof(*p_ptr), GFP_ATOMIC);
-	if (!p_ptr) {
-		pr_warn("Port creation failed, no memory\n");
-		return NULL;
-	}
-	ref = tipc_ref_acquire(p_ptr, &p_ptr->lock);
-	if (!ref) {
-		pr_warn("Port creation failed, ref. table exhausted\n");
-		kfree(p_ptr);
-		return NULL;
-	}
-
-	p_ptr->usr_handle = usr_handle;
-	p_ptr->max_pkt = MAX_PKT_DEFAULT;
-	p_ptr->ref = ref;
-	INIT_LIST_HEAD(&p_ptr->wait_list);
-	INIT_LIST_HEAD(&p_ptr->subscription.nodesub_list);
-	p_ptr->dispatcher = dispatcher;
-	p_ptr->wakeup = wakeup;
-	k_init_timer(&p_ptr->timer, (Handler)port_timeout, ref);
-	INIT_LIST_HEAD(&p_ptr->publications);
-	INIT_LIST_HEAD(&p_ptr->port_list);
-
-	/*
-	 * Must hold port list lock while initializing message header template
-	 * to ensure a change to node's own network address doesn't result
-	 * in template containing out-dated network address information
-	 */
-	spin_lock_bh(&tipc_port_list_lock);
-	msg = &p_ptr->phdr;
-	tipc_msg_init(msg, importance, TIPC_NAMED_MSG, NAMED_H_SIZE, 0);
-	msg_set_origport(msg, ref);
-	list_add_tail(&p_ptr->port_list, &ports);
-	spin_unlock_bh(&tipc_port_list_lock);
-	return p_ptr;
-}
-
-int tipc_deleteport(u32 ref)
-{
-	struct tipc_port *p_ptr;
-	struct sk_buff *buf = NULL;
-
-	tipc_withdraw(ref, 0, NULL);
-	p_ptr = tipc_port_lock(ref);
-	if (!p_ptr)
-		return -EINVAL;
-
-	tipc_ref_discard(ref);
-	tipc_port_unlock(p_ptr);
-
-	k_cancel_timer(&p_ptr->timer);
-	if (p_ptr->connected) {
-		buf = port_build_peer_abort_msg(p_ptr, TIPC_ERR_NO_PORT);
-		tipc_nodesub_unsubscribe(&p_ptr->subscription);
-	}
-
-	spin_lock_bh(&tipc_port_list_lock);
-	list_del(&p_ptr->port_list);
-	list_del(&p_ptr->wait_list);
-	spin_unlock_bh(&tipc_port_list_lock);
-	k_term_timer(&p_ptr->timer);
-	kfree(p_ptr);
-	tipc_net_route_msg(buf);
-	return 0;
 }
 
 static int port_unreliable(struct tipc_port *p_ptr)

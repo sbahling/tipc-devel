@@ -218,9 +218,6 @@ int tipc_send2port(u32 portref, struct tipc_portid const *dest,
 		   unsigned int num_sect, struct iovec const *msg_sect,
 		   unsigned int total_len);
 
-int tipc_send_buf2port(u32 portref, struct tipc_portid const *dest,
-		struct sk_buff *buf, unsigned int dsz);
-
 int tipc_multicast(u32 portref, struct tipc_name_seq const *seq,
 		   unsigned int section_count, struct iovec const *msg,
 		   unsigned int total_len);

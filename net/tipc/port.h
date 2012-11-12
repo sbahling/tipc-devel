@@ -45,10 +45,10 @@
 
 #define TIPC_FLOW_CONTROL_WIN 512
 
+
 /**
  * struct tipc_port - TIPC port structure
  * @usr_handle: pointer to additional user-defined information about port
- * @lock: pointer to spinlock for controlling access to port
  * @connected: non-zero if port is currently connected to a peer port
  * @conn_type: TIPC type used when connection was established
  * @conn_instance: TIPC instance used when connection was established
@@ -74,7 +74,6 @@
  */
 struct tipc_port {
 	void *usr_handle;
-	spinlock_t *lock;
 	int connected;
 	u32 conn_type;
 	u32 conn_instance;
@@ -174,24 +173,6 @@ struct sk_buff *tipc_port_get_ports(void);
 void tipc_port_recv_proto_msg(struct sk_buff *buf);
 void tipc_port_recv_mcast(struct sk_buff *buf, struct tipc_port_list *dp);
 void tipc_port_reinit(void);
-
-/**
- * tipc_port_lock - lock port instance referred to and return its pointer
- */
-static inline struct tipc_port *tipc_port_lock(u32 ref)
-{
-	return (struct tipc_port *)tipc_ref_lock(ref);
-}
-
-/**
- * tipc_port_unlock - unlock a port instance
- *
- * Can use pointer instead of tipc_ref_unlock() since port is already locked.
- */
-static inline void tipc_port_unlock(struct tipc_port *p_ptr)
-{
-	spin_unlock_bh(p_ptr->lock);
-}
 
 static inline struct tipc_port *tipc_port_deref(u32 ref)
 {

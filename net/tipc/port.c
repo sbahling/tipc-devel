@@ -34,6 +34,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <net/sock.h>
 #include "core.h"
 #include "config.h"
 #include "port.h"
@@ -72,7 +73,8 @@ int tipc_init_sock(struct sock *sk)
 	struct tipc_msg *msg;
 	u32 ref;
 	p_ptr = tipc_sk_port(sk);
-	ref = tipc_ref_acquire(p_ptr, &p_ptr->lock);
+	//FIXME:
+	ref = tipc_ref_acquire(p_ptr);
 	if (!ref) {
 		pr_warn("Port creation failed, ref. table exhausted\n");
 		kfree(p_ptr);
@@ -110,14 +112,7 @@ void tipc_destroy_sock(struct sock *sk)
 	
 	p_ptr = tipc_sk_port(sk);
 	tipc_withdraw(p_ptr->ref, 0, NULL);
-	p_ptr = tipc_port_lock(p_ptr->ref);
-
-	if (!p_ptr)
-		return;
-
 	tipc_ref_discard(p_ptr->ref);
-	tipc_port_unlock(p_ptr);
-
 	k_cancel_timer(&p_ptr->timer);
 	if (p_ptr->connected) {
 		buf = port_build_peer_abort_msg(p_ptr, TIPC_ERR_NO_PORT);
@@ -278,11 +273,10 @@ int tipc_portunreliable(u32 ref, unsigned int *isunreliable)
 {
 	struct tipc_port *p_ptr;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	*isunreliable = port_unreliable(p_ptr);
-	tipc_port_unlock(p_ptr);
 	return 0;
 }
 
@@ -290,11 +284,10 @@ int tipc_set_portunreliable(u32 ref, unsigned int isunreliable)
 {
 	struct tipc_port *p_ptr;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	msg_set_src_droppable(&p_ptr->phdr, (isunreliable != 0));
-	tipc_port_unlock(p_ptr);
 	return 0;
 }
 
@@ -307,11 +300,10 @@ int tipc_portunreturnable(u32 ref, unsigned int *isunrejectable)
 {
 	struct tipc_port *p_ptr;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	*isunrejectable = port_unreturnable(p_ptr);
-	tipc_port_unlock(p_ptr);
 	return 0;
 }
 
@@ -319,11 +311,10 @@ int tipc_set_portunreturnable(u32 ref, unsigned int isunrejectable)
 {
 	struct tipc_port *p_ptr;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	msg_set_dest_droppable(&p_ptr->phdr, (isunrejectable != 0));
-	tipc_port_unlock(p_ptr);
 	return 0;
 }
 
@@ -350,6 +341,7 @@ static struct sk_buff *port_build_proto_msg(struct tipc_port *p_ptr,
 	return buf;
 }
 
+//TODO: completely rewrite this, move to linklayer and implement rejection queue
 int tipc_reject_msg(struct sk_buff *buf, u32 err)
 {
 	struct tipc_msg *msg = buf_msg(buf);
@@ -399,14 +391,14 @@ int tipc_reject_msg(struct sk_buff *buf, u32 err)
 
 	/* send self-abort message when rejecting on a connected port */
 	if (msg_connected(msg)) {
-		struct tipc_port *p_ptr = tipc_port_lock(msg_destport(msg));
-
+		struct tipc_port *p_ptr = tipc_port_deref(msg_destport(msg));
 		if (p_ptr) {
 			struct sk_buff *abuf = NULL;
-
+			struct sock *sk = p_ptr->usr_handle;
+			lock_sock(sk);
 			if (p_ptr->connected)
 				abuf = port_build_self_abort_msg(p_ptr, err);
-			tipc_port_unlock(p_ptr);
+			release_sock(sk);
 			tipc_net_route_msg(abuf);
 		}
 	}
@@ -439,14 +431,17 @@ int tipc_port_reject_sections(struct tipc_port *p_ptr, struct tipc_msg *hdr,
 
 static void port_timeout(unsigned long ref)
 {
-	struct tipc_port *p_ptr = tipc_port_lock(ref);
+	struct tipc_port *p_ptr = tipc_port_deref(ref);
+	struct sock *sk;
 	struct sk_buff *buf = NULL;
 
 	if (!p_ptr)
 		return;
+	sk = p_ptr->usr_handle;
+	bh_lock_sock(sk);
 
 	if (!p_ptr->connected) {
-		tipc_port_unlock(p_ptr);
+		release_sock(sk);
 		return;
 	}
 
@@ -458,20 +453,23 @@ static void port_timeout(unsigned long ref)
 		p_ptr->probing_state = PROBING;
 		k_start_timer(&p_ptr->timer, p_ptr->probing_interval);
 	}
-	tipc_port_unlock(p_ptr);
+	bh_unlock_sock(sk);
 	tipc_net_route_msg(buf);
 }
 
 
 static void port_handle_node_down(unsigned long ref)
 {
-	struct tipc_port *p_ptr = tipc_port_lock(ref);
+	struct tipc_port *p_ptr = tipc_port_deref(ref);
+	struct sock *sk;
 	struct sk_buff *buf = NULL;
 
 	if (!p_ptr)
 		return;
+	sk = p_ptr->usr_handle;
+	bh_lock_sock(sk);
 	buf = port_build_self_abort_msg(p_ptr, TIPC_ERR_NO_NODE);
-	tipc_port_unlock(p_ptr);
+	bh_unlock_sock(sk);
 	tipc_net_route_msg(buf);
 }
 
@@ -515,13 +513,16 @@ static struct sk_buff *port_build_peer_abort_msg(struct tipc_port *p_ptr, u32 er
 void tipc_port_recv_proto_msg(struct sk_buff *buf)
 {
 	struct tipc_msg *msg = buf_msg(buf);
+	struct sock *sk;
 	struct tipc_port *p_ptr;
 	struct sk_buff *r_buf = NULL;
 	u32 destport = msg_destport(msg);
 	int wakeable;
 
 	/* Validate connection */
-	p_ptr = tipc_port_lock(destport);
+	p_ptr = tipc_port_deref(destport);
+	sk = p_ptr->usr_handle;
+	bh_lock_sock(sk);
 	if (!p_ptr || !p_ptr->connected || !tipc_port_peer_msg(p_ptr, msg)) {
 		r_buf = tipc_buf_acquire(BASIC_H_SIZE);
 		if (r_buf) {
@@ -533,7 +534,7 @@ void tipc_port_recv_proto_msg(struct sk_buff *buf)
 			msg_set_destport(msg, msg_origport(msg));
 		}
 		if (p_ptr)
-			tipc_port_unlock(p_ptr);
+			bh_unlock_sock(sk);
 		goto exit;
 	}
 
@@ -557,7 +558,7 @@ void tipc_port_recv_proto_msg(struct sk_buff *buf)
 		break;
 	}
 	p_ptr->probing_state = CONFIRMED;
-	tipc_port_unlock(p_ptr);
+	bh_unlock_sock(sk);
 exit:
 	tipc_net_route_msg(r_buf);
 	kfree_skb(buf);
@@ -609,6 +610,7 @@ static int port_print(struct tipc_port *p_ptr, char *buf, int len, int full_id)
 struct sk_buff *tipc_port_get_ports(void)
 {
 	struct sk_buff *buf;
+	struct sock *sk;
 	struct tlv_desc *rep_tlv;
 	char *pb;
 	int pb_len;
@@ -624,9 +626,10 @@ struct sk_buff *tipc_port_get_ports(void)
 
 	spin_lock_bh(&tipc_port_list_lock);
 	list_for_each_entry(p_ptr, &ports, port_list) {
-		spin_lock_bh(p_ptr->lock);
+		sk = p_ptr->usr_handle;
+		lock_sock(sk);
 		str_len += port_print(p_ptr, pb, pb_len, 0);
-		spin_unlock_bh(p_ptr->lock);
+		release_sock(sk);
 	}
 	spin_unlock_bh(&tipc_port_list_lock);
 	str_len += 1;	/* for "\0" */
@@ -655,14 +658,13 @@ void tipc_acknowledge(u32 ref, u32 ack)
 	struct tipc_port *p_ptr;
 	struct sk_buff *buf = NULL;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return;
 	if (p_ptr->connected) {
 		p_ptr->conn_unacked -= ack;
 		buf = port_build_proto_msg(p_ptr, CONN_ACK, ack);
 	}
-	tipc_port_unlock(p_ptr);
 	tipc_net_route_msg(buf);
 }
 
@@ -670,11 +672,10 @@ int tipc_portimportance(u32 ref, unsigned int *importance)
 {
 	struct tipc_port *p_ptr;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	*importance = (unsigned int)msg_importance(&p_ptr->phdr);
-	tipc_port_unlock(p_ptr);
 	return 0;
 }
 
@@ -685,11 +686,10 @@ int tipc_set_portimportance(u32 ref, unsigned int imp)
 	if (imp > TIPC_CRITICAL_IMPORTANCE)
 		return -EINVAL;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	msg_set_importance(&p_ptr->phdr, (u32)imp);
-	tipc_port_unlock(p_ptr);
 	return 0;
 }
 
@@ -701,17 +701,14 @@ int tipc_publish(u32 ref, unsigned int scope, struct tipc_name_seq const *seq)
 	u32 key;
 	int res = -EINVAL;
 
-	p_ptr = tipc_port_lock(ref);
-	if (!p_ptr)
+	p_ptr = tipc_port_deref(ref);
+	if (!p_ptr || p_ptr->connected)
 		return -EINVAL;
 
-	if (p_ptr->connected)
-		goto exit;
 	key = ref + p_ptr->pub_count + 1;
-	if (key == ref) {
-		res = -EADDRINUSE;
-		goto exit;
-	}
+	if (key == ref)
+		return -EADDRINUSE;
+
 	publ = tipc_nametbl_publish(seq->type, seq->lower, seq->upper,
 				    scope, p_ptr->ref, key);
 	if (publ) {
@@ -720,8 +717,6 @@ int tipc_publish(u32 ref, unsigned int scope, struct tipc_name_seq const *seq)
 		p_ptr->published = 1;
 		res = 0;
 	}
-exit:
-	tipc_port_unlock(p_ptr);
 	return res;
 }
 
@@ -732,7 +727,7 @@ int tipc_withdraw(u32 ref, unsigned int scope, struct tipc_name_seq const *seq)
 	struct publication *tpubl;
 	int res = -EINVAL;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	if (!seq) {
@@ -761,7 +756,6 @@ int tipc_withdraw(u32 ref, unsigned int scope, struct tipc_name_seq const *seq)
 	}
 	if (list_empty(&p_ptr->publications))
 		p_ptr->published = 0;
-	tipc_port_unlock(p_ptr);
 	return res;
 }
 
@@ -771,7 +765,7 @@ int tipc_connect2port(u32 ref, struct tipc_portid const *peer)
 	struct tipc_msg *msg;
 	int res = -EINVAL;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	if (p_ptr->published || p_ptr->connected)
@@ -796,7 +790,6 @@ int tipc_connect2port(u32 ref, struct tipc_portid const *peer)
 			  (net_ev_handler)port_handle_node_down);
 	res = 0;
 exit:
-	tipc_port_unlock(p_ptr);
 	p_ptr->max_pkt = tipc_link_get_max_pkt(peer->node, ref);
 	return res;
 }
@@ -804,7 +797,6 @@ exit:
 /**
  * tipc_disconnect_port - disconnect port from peer
  *
- * Port must be locked.
  */
 int tipc_disconnect_port(struct tipc_port *tp_ptr)
 {
@@ -830,11 +822,10 @@ int tipc_disconnect(u32 ref)
 	struct tipc_port *p_ptr;
 	int res;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
 	res = tipc_disconnect_port(p_ptr);
-	tipc_port_unlock(p_ptr);
 	return res;
 }
 
@@ -846,12 +837,10 @@ int tipc_shutdown(u32 ref)
 	struct tipc_port *p_ptr;
 	struct sk_buff *buf = NULL;
 
-	p_ptr = tipc_port_lock(ref);
+	p_ptr = tipc_port_deref(ref);
 	if (!p_ptr)
 		return -EINVAL;
-
 	buf = port_build_peer_abort_msg(p_ptr, TIPC_CONN_SHUTDOWN);
-	tipc_port_unlock(p_ptr);
 	tipc_net_route_msg(buf);
 	return tipc_disconnect(ref);
 }
@@ -874,10 +863,9 @@ int tipc_port_recv_msg(struct sk_buff *buf)
 	}
 
 	/* validate destination & pass to port, otherwise reject message */
-	p_ptr = tipc_port_lock(destport);
+	p_ptr = tipc_port_deref(destport);
 	if (likely(p_ptr)) {
 		err = p_ptr->dispatcher(p_ptr, buf);
-		tipc_port_unlock(p_ptr);
 		if (likely(!err))
 			return dsz;
 	} else {

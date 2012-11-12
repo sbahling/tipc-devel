@@ -215,8 +215,7 @@ static int tipc_create(struct net *net, struct socket *sock, int protocol,
 	tp_ptr = tipc_sk_port(sk);
 	tipc_sk(sk)->conn_timeout = CONN_TIMEOUT_DEFAULT;
 
-	spin_unlock_bh(tp_ptr->lock);
-
+	//TODO: need to hold socket lock here?
 	if (sock->state == SS_READY) {
 		tipc_set_portunreturnable(tp_ptr->ref, 1);
 		if (sock->type == SOCK_DGRAM)
@@ -321,30 +320,51 @@ static int release(struct socket *sock)
  */
 static int bind(struct socket *sock, struct sockaddr *uaddr, int uaddr_len)
 {
-	struct sockaddr_tipc *addr = (struct sockaddr_tipc *)uaddr;
-	u32 portref = tipc_sk_port(sock->sk)->ref;
+	struct sock *sk = sock->sk;
+	struct sockaddr_tipc *addr;
+	u32 portref;
+	int err;
 
-	if (unlikely(!uaddr_len))
-		return tipc_withdraw(portref, 0, NULL);
+	lock_sock(sk);
+	portref = tipc_sk_port(sock->sk)->ref;
+	addr = (struct sockaddr_tipc *)uaddr;
 
-	if (uaddr_len < sizeof(struct sockaddr_tipc))
-		return -EINVAL;
-	if (addr->family != AF_TIPC)
-		return -EAFNOSUPPORT;
+	if (unlikely(!uaddr_len)) {
+		err = tipc_withdraw(portref, 0, NULL);
+		goto exit;
+	}
+
+	if (uaddr_len < sizeof(struct sockaddr_tipc)) {
+		err = -EINVAL;
+		goto exit;
+	}
+	if (addr->family != AF_TIPC) {
+		err = -EAFNOSUPPORT;
+		goto exit;
+	}
 
 	if (addr->addrtype == TIPC_ADDR_NAME)
 		addr->addr.nameseq.upper = addr->addr.nameseq.lower;
-	else if (addr->addrtype != TIPC_ADDR_NAMESEQ)
-		return -EAFNOSUPPORT;
+	else if (addr->addrtype != TIPC_ADDR_NAMESEQ) {
+		err  = -EAFNOSUPPORT;
+		goto exit;
+	}
 
 	if ((addr->addr.nameseq.type < TIPC_RESERVED_TYPES) &&
 	    (addr->addr.nameseq.type != TIPC_TOP_SRV) &&
-	    (addr->addr.nameseq.type != TIPC_CFG_SRV))
-		return -EACCES;
+	    (addr->addr.nameseq.type != TIPC_CFG_SRV)) {
+		err =  -EACCES;
+		goto exit;
+	}
 
-	return (addr->scope > 0) ?
-		tipc_publish(portref, addr->scope, &addr->addr.nameseq) :
-		tipc_withdraw(portref, -addr->scope, &addr->addr.nameseq);
+	if (addr->scope > 0)
+		err = tipc_publish(portref, addr->scope, &addr->addr.nameseq);
+	else
+		err = tipc_withdraw(portref, -addr->scope, &addr->addr.nameseq);
+
+exit: 
+	release_sock(sk);
+	return err;
 }
 
 /**
@@ -1202,6 +1222,9 @@ static u32 filter_rcv(struct sock *sk, struct sk_buff *buf)
 	struct tipc_msg *msg = buf_msg(buf);
 	u32 recv_q_len;
 
+	if (sock_flag(sk, SOCK_DEAD))
+		return TIPC_CONN_SHUTDOWN;
+
 	/* Reject message if it is wrong sort of message for socket */
 	if (msg_type(msg) > TIPC_DIRECT_MSG)
 		return TIPC_ERR_NO_PORT;
@@ -1252,7 +1275,6 @@ static u32 filter_rcv(struct sock *sk, struct sk_buff *buf)
 		sock->state = SS_DISCONNECTING;
 		tipc_disconnect_port(tipc_sk_port(sk));
 	}
-
 	sk->sk_data_ready(sk, 0);
 	return TIPC_OK;
 }

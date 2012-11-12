@@ -412,7 +412,11 @@ static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 	struct tipc_port *p_ptr;
 
 	spin_lock_bh(&tipc_port_list_lock);
-	p_ptr = tipc_port_lock(origport);
+	//TODO: how the hell do we do here?
+	//this can be called from user context, but also in bh
+	//if we get a link switchover... cant very well grab socket locks etc here..
+//	p_ptr = tipc_port_lock(origport);
+	p_ptr = tipc_port_deref(origport);
 	if (p_ptr) {
 		if (!p_ptr->wakeup)
 			goto exit;
@@ -422,9 +426,8 @@ static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 		p_ptr->waiting_pkts = 1 + ((sz - 1) / l_ptr->max_pkt);
 		list_add_tail(&p_ptr->wait_list, &l_ptr->waiting_ports);
 		l_ptr->stats.link_congs++;
-exit:
-		tipc_port_unlock(p_ptr);
 	}
+exit:
 	spin_unlock_bh(&tipc_port_list_lock);
 	return -ELINKCONG;
 }
@@ -448,11 +451,12 @@ void tipc_link_wakeup_ports(struct tipc_link *l_ptr, int all)
 		if (win <= 0)
 			break;
 		list_del_init(&p_ptr->wait_list);
-		spin_lock_bh(p_ptr->lock);
+		//same thing here.. wtf
+//		spin_lock_bh(p_ptr->lock);
 		p_ptr->congested = 0;
 		p_ptr->wakeup(p_ptr);
 		win -= p_ptr->waiting_pkts;
-		spin_unlock_bh(p_ptr->lock);
+//		spin_unlock_bh(p_ptr->lock);
 	}
 
 exit:

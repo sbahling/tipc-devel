@@ -33,7 +33,7 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
-
+#include <net/sock.h>
 #include "core.h"
 #include "link.h"
 #include "port.h"
@@ -410,7 +410,8 @@ static void link_start(struct tipc_link *l_ptr)
 static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 {
 	struct tipc_port *p_ptr;
-
+	struct sock *sk;
+	bool owned;
 	spin_lock_bh(&tipc_port_list_lock);
 	//TODO: how the hell do we do here?
 	//this can be called from user context, but also in bh
@@ -418,6 +419,10 @@ static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 //	p_ptr = tipc_port_lock(origport);
 	p_ptr = tipc_port_deref(origport);
 	if (p_ptr) {
+		sk = p_ptr->usr_handle;
+		owned = sock_owned_by_user(sk);
+		if (!owned)
+			bh_lock_sock(sk);
 		if (!p_ptr->wakeup)
 			goto exit;
 		if (!list_empty(&p_ptr->wait_list))
@@ -425,6 +430,8 @@ static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 		p_ptr->congested = 1;
 		p_ptr->waiting_pkts = 1 + ((sz - 1) / l_ptr->max_pkt);
 		list_add_tail(&p_ptr->wait_list, &l_ptr->waiting_ports);
+		if (!owned)
+			bh_unlock_sock(sk);
 		l_ptr->stats.link_congs++;
 	}
 exit:

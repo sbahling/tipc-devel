@@ -71,24 +71,15 @@ int tipc_init_sock(struct sock *sk)
 {
 	struct tipc_port *p_ptr;
 	struct tipc_msg *msg;
-	u32 ref;
 	p_ptr = tipc_sk_port(sk);
 	printk("init sock proto cb\n");
-	ref = tipc_ref_acquire(p_ptr);
-	if (!ref) {
-		pr_warn("Port creation failed, ref. table exhausted\n");
-		kfree(p_ptr);
-		return -ENOMEM;
-	}
 
-	p_ptr->usr_handle = sk;
 	p_ptr->max_pkt = MAX_PKT_DEFAULT;
-	p_ptr->ref = ref;
 	INIT_LIST_HEAD(&p_ptr->wait_list);
 	INIT_LIST_HEAD(&p_ptr->subscription.nodesub_list);
 	p_ptr->dispatcher = dispatch;
 	p_ptr->wakeup = wakeupdispatch;
-	k_init_timer(&p_ptr->timer, (Handler)port_timeout, ref);
+	k_init_timer(&p_ptr->timer, (Handler)port_timeout, p_ptr->ref);
 	INIT_LIST_HEAD(&p_ptr->publications);
 	INIT_LIST_HEAD(&p_ptr->port_list);
 	/*
@@ -99,7 +90,7 @@ int tipc_init_sock(struct sock *sk)
 	spin_lock_bh(&tipc_port_list_lock);
 	msg = &p_ptr->phdr;
 	tipc_msg_init(msg, TIPC_LOW_IMPORTANCE, TIPC_NAMED_MSG, NAMED_H_SIZE, 0);
-	msg_set_origport(msg, ref);
+	msg_set_origport(msg, p_ptr->ref);
 	list_add_tail(&p_ptr->port_list, &ports);
 	spin_unlock_bh(&tipc_port_list_lock);
 	return 0;
@@ -395,14 +386,14 @@ int tipc_reject_msg(struct sk_buff *buf, u32 err)
 		if (p_ptr) {
 			
 			struct sk_buff *abuf = NULL;
-			struct sock *sk = p_ptr->usr_handle;
-			owned = sock_owned_by_user(sk);
+			struct tipc_sock *tsk = port_tsk(p_ptr);
+			owned = sock_owned_by_user(&tsk->sk);
 			if (!owned)
-				bh_lock_sock(sk);
+				bh_lock_sock(&tsk->sk);
 			if (p_ptr->connected)
 				abuf = port_build_self_abort_msg(p_ptr, err);
 			if(!owned)
-				bh_unlock_sock(sk);
+				bh_unlock_sock(&tsk->sk);
 			tipc_net_route_msg(abuf);
 		}
 	}
@@ -436,16 +427,16 @@ int tipc_port_reject_sections(struct tipc_port *p_ptr, struct tipc_msg *hdr,
 static void port_timeout(unsigned long ref)
 {
 	struct tipc_port *p_ptr = tipc_port_deref(ref);
-	struct sock *sk;
+	struct tipc_sock *tsk;
 	struct sk_buff *buf = NULL;
 
 	if (!p_ptr)
 		return;
-	sk = p_ptr->usr_handle;
-	bh_lock_sock(sk);
+	tsk =  port_tsk(p_ptr);
+	bh_lock_sock(&tsk->sk);
 
 	if (!p_ptr->connected) {
-		bh_unlock_sock(sk);
+		bh_unlock_sock(&tsk->sk);
 		return;
 	}
 
@@ -457,7 +448,7 @@ static void port_timeout(unsigned long ref)
 		p_ptr->probing_state = PROBING;
 		k_start_timer(&p_ptr->timer, p_ptr->probing_interval);
 	}
-	bh_unlock_sock(sk);
+	bh_unlock_sock(&tsk->sk);
 	tipc_net_route_msg(buf);
 }
 
@@ -465,15 +456,15 @@ static void port_timeout(unsigned long ref)
 static void port_handle_node_down(unsigned long ref)
 {
 	struct tipc_port *p_ptr = tipc_port_deref(ref);
-	struct sock *sk;
+	struct tipc_sock *tsk;
 	struct sk_buff *buf = NULL;
 
 	if (!p_ptr)
 		return;
-	sk = p_ptr->usr_handle;
-	bh_lock_sock(sk);
+	tsk = port_tsk(p_ptr);
+	bh_lock_sock(&tsk->sk);
 	buf = port_build_self_abort_msg(p_ptr, TIPC_ERR_NO_NODE);
-	bh_unlock_sock(sk);
+	bh_unlock_sock(&tsk->sk);
 	tipc_net_route_msg(buf);
 }
 
@@ -517,7 +508,7 @@ static struct sk_buff *port_build_peer_abort_msg(struct tipc_port *p_ptr, u32 er
 void tipc_port_recv_proto_msg(struct sk_buff *buf)
 {
 	struct tipc_msg *msg = buf_msg(buf);
-	struct sock *sk;
+	struct tipc_sock *tsk;
 	struct tipc_port *p_ptr;
 	struct sk_buff *r_buf = NULL;
 	u32 destport = msg_destport(msg);
@@ -525,8 +516,8 @@ void tipc_port_recv_proto_msg(struct sk_buff *buf)
 
 	/* Validate connection */
 	p_ptr = tipc_port_deref(destport);
-	sk = p_ptr->usr_handle;
-	bh_lock_sock(sk);
+	tsk = port_tsk(p_ptr);
+	bh_lock_sock(&tsk->sk);
 	if (!p_ptr || !p_ptr->connected || !tipc_port_peer_msg(p_ptr, msg)) {
 		r_buf = tipc_buf_acquire(BASIC_H_SIZE);
 		if (r_buf) {
@@ -538,7 +529,7 @@ void tipc_port_recv_proto_msg(struct sk_buff *buf)
 			msg_set_destport(msg, msg_origport(msg));
 		}
 		if (p_ptr)
-			bh_unlock_sock(sk);
+			bh_unlock_sock(&tsk->sk);
 		goto exit;
 	}
 
@@ -562,7 +553,7 @@ void tipc_port_recv_proto_msg(struct sk_buff *buf)
 		break;
 	}
 	p_ptr->probing_state = CONFIRMED;
-	bh_unlock_sock(sk);
+	bh_unlock_sock(&tsk->sk);
 exit:
 	tipc_net_route_msg(r_buf);
 	kfree_skb(buf);
@@ -630,7 +621,7 @@ struct sk_buff *tipc_port_get_ports(void)
 
 	spin_lock_bh(&tipc_port_list_lock);
 	list_for_each_entry(p_ptr, &ports, port_list) {
-		sk = p_ptr->usr_handle;
+		sk = &(port_tsk(p_ptr)->sk);
 		lock_sock(sk);
 		str_len += port_print(p_ptr, pb, pb_len, 0);
 		release_sock(sk);

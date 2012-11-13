@@ -163,7 +163,6 @@ static void tipc_hash_sock(struct sock *sk)
 		return;
 	}
 	p_ptr->ref = ref;
-	p_ptr->usr_handle = sk;
 }
 
 /**
@@ -1331,7 +1330,7 @@ static int backlog_rcv(struct sock *sk, struct sk_buff *buf)
  */
 u32 dispatch(struct tipc_port *tport, struct sk_buff *buf)
 {
-	struct sock *sk = (struct sock *)tport->usr_handle;
+	struct sock *sk = &(port_tsk(tport)->sk);
 	u32 res;
 
 	/*
@@ -1362,7 +1361,7 @@ u32 dispatch(struct tipc_port *tport, struct sk_buff *buf)
  */
 void wakeupdispatch(struct tipc_port *tport)
 {
-	struct sock *sk = (struct sock *)tport->usr_handle;
+	struct sock *sk = &(port_tsk(tport)->sk);
 
 	sk->sk_write_space(sk);
 }

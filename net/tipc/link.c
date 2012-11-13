@@ -410,7 +410,7 @@ static void link_start(struct tipc_link *l_ptr)
 static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 {
 	struct tipc_port *p_ptr;
-	struct sock *sk;
+	struct tipc_sock *tsk;
 	bool owned;
 	spin_lock_bh(&tipc_port_list_lock);
 	//TODO: how the hell do we do here?
@@ -418,10 +418,10 @@ static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 	//if we get a link switchover... cant very well grab socket locks etc here..
 	p_ptr = tipc_port_deref(origport);
 	if (p_ptr) {
-		sk = p_ptr->usr_handle;
-		owned = sock_owned_by_user(sk);
+		tsk = port_tsk(p_ptr);
+		owned = sock_owned_by_user(&tsk->sk);
 		if (!owned)
-			bh_lock_sock(sk);
+			bh_lock_sock(&tsk->sk);
 		if (!p_ptr->wakeup)
 			goto exit;
 		if (!list_empty(&p_ptr->wait_list))
@@ -430,7 +430,7 @@ static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 		p_ptr->waiting_pkts = 1 + ((sz - 1) / l_ptr->max_pkt);
 		list_add_tail(&p_ptr->wait_list, &l_ptr->waiting_ports);
 		if (!owned)
-			bh_unlock_sock(sk);
+			bh_unlock_sock(&tsk->sk);
 		l_ptr->stats.link_congs++;
 	}
 exit:

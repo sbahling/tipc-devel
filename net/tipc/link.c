@@ -416,7 +416,6 @@ static int link_schedule_port(struct tipc_link *l_ptr, u32 origport, u32 sz)
 	//TODO: how the hell do we do here?
 	//this can be called from user context, but also in bh
 	//if we get a link switchover... cant very well grab socket locks etc here..
-//	p_ptr = tipc_port_lock(origport);
 	p_ptr = tipc_port_deref(origport);
 	if (p_ptr) {
 		sk = p_ptr->usr_handle;

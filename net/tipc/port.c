@@ -73,7 +73,7 @@ int tipc_init_sock(struct sock *sk)
 	struct tipc_msg *msg;
 	u32 ref;
 	p_ptr = tipc_sk_port(sk);
-	//FIXME:
+	printk("init sock proto cb\n");
 	ref = tipc_ref_acquire(p_ptr);
 	if (!ref) {
 		pr_warn("Port creation failed, ref. table exhausted\n");
@@ -112,7 +112,6 @@ void tipc_destroy_sock(struct sock *sk)
 	
 	p_ptr = tipc_sk_port(sk);
 	tipc_withdraw(p_ptr->ref, 0, NULL);
-	tipc_ref_discard(p_ptr->ref);
 	k_cancel_timer(&p_ptr->timer);
 	if (p_ptr->connected) {
 		buf = port_build_peer_abort_msg(p_ptr, TIPC_ERR_NO_PORT);

@@ -147,6 +147,34 @@ static void reject_rx_queue(struct sock *sk)
 		atomic_dec(&tipc_queue_size);
 	}
 }
+/**
+ *
+ */
+static void tipc_hash_sock(struct sock *sk)
+{
+	struct tipc_port *p_ptr;
+	u32 ref;
+
+	printk("tipc_hash_sock\n");
+	p_ptr = tipc_sk_port(sk);
+	ref = tipc_ref_acquire(p_ptr);
+	if (!ref) {
+		pr_warn("Port creation failed, ref. table exhausted\n");
+		return;
+	}
+	p_ptr->ref = ref;
+	p_ptr->usr_handle = sk;
+}
+
+/**
+ * tipc_unhash_sock - release socket port reference
+ *
+ */
+static void tipc_unhash_sock(struct sock *sk)
+{
+	u32 ref = tipc_sk_port(sk)->ref;
+	tipc_ref_discard(ref);
+}
 
 /**
  * tipc_create - create a TIPC socket
@@ -200,6 +228,8 @@ static int tipc_create(struct net *net, struct socket *sock, int protocol,
 	sock->ops = ops;
 	sock->state = state;
 	sock_init_data(sock, sk);
+	sk->sk_prot->hash(sk);
+
 	if (sk->sk_prot->init) {
 		err = sk->sk_prot->init(sk);
 		if (err) {
@@ -215,7 +245,6 @@ static int tipc_create(struct net *net, struct socket *sock, int protocol,
 	tp_ptr = tipc_sk_port(sk);
 	tipc_sk(sk)->conn_timeout = CONN_TIMEOUT_DEFAULT;
 
-	//TODO: need to hold socket lock here?
 	if (sock->state == SS_READY) {
 		tipc_set_portunreturnable(tp_ptr->ref, 1);
 		if (sock->type == SOCK_DGRAM)
@@ -278,26 +307,19 @@ static int release(struct socket *sock)
 		}
 	}
 
-	//TODO: replace all this with a call to sk_common_release(sk);
-	//need to fix hash/unhash functions for this to work i think..
-
+	/* Reject any messages that accumulated in backlog queue */
+	sock->state = SS_DISCONNECTING;
+	/* Discard any remaining (connection-based) messages in receive queue */
+	discard_rx_queue(sk);
 	/*
 	 * Deleting the TIPC port ensures no more messages are queued
 	 * (also disconnects an active connection & sends a 'FIN-' to peer)
 	 */
-	if (sk->sk_prot->destroy) {
-		sk->sk_prot->destroy(sk);
-	}
-	sock_orphan(sk);
-	sk_refcnt_debug_release(sk);
-	/* Discard any remaining (connection-based) messages in receive queue */
-	discard_rx_queue(sk);
-
-	/* Reject any messages that accumulated in backlog queue */
-	sock->state = SS_DISCONNECTING;
 	release_sock(sk);
+	sk_common_release(sk);
 
-	sock_put(sk);
+
+
 	sock->sk = NULL;
 
 	return res;
@@ -1826,6 +1848,8 @@ static const struct net_proto_family tipc_family_ops = {
 static struct proto tipc_proto = {
 	.name		= "TIPC",
 	.owner		= THIS_MODULE,
+	.hash		= tipc_hash_sock,
+	.unhash		= tipc_unhash_sock,
 	.obj_size	= sizeof(struct tipc_sock),
 	.slab_flags	= SLAB_DESTROY_BY_RCU,
 	.init		= tipc_init_sock,

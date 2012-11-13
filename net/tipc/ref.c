@@ -45,7 +45,6 @@
  */
 struct reference {
 	void *object;
-	spinlock_t lock;
 	u32 ref;
 };
 
@@ -233,27 +232,6 @@ void tipc_ref_discard(u32 ref)
 exit:
 	write_unlock_bh(&ref_table_lock);
 }
-
-/**
- * tipc_ref_lock - lock referenced object and return pointer to it
- */
-void *tipc_ref_lock(u32 ref)
-{
-	if (likely(tipc_ref_table.entries)) {
-		struct reference *entry;
-
-		entry = &tipc_ref_table.entries[ref &
-						tipc_ref_table.index_mask];
-		if (likely(entry->ref != 0)) {
-			spin_lock_bh(&entry->lock);
-			if (likely((entry->ref == ref) && (entry->object)))
-				return entry->object;
-			spin_unlock_bh(&entry->lock);
-		}
-	}
-	return NULL;
-}
-
 
 /**
  * tipc_ref_deref - return pointer referenced object (without locking it)

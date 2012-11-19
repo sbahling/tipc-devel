@@ -342,7 +342,6 @@ int tipc_reject_msg(struct sk_buff *buf, u32 err)
 	u32 data_sz = msg_data_sz(msg);
 	u32 src_node;
 	u32 rmsg_sz;
-	bool owned;
 
 	/* discard rejected message if it shouldn't be returned to sender */
 	if (WARN(!msg_isdata(msg),
@@ -387,13 +386,10 @@ int tipc_reject_msg(struct sk_buff *buf, u32 err)
 			
 			struct sk_buff *abuf = NULL;
 			struct tipc_sock *tsk = port_tsk(p_ptr);
-			owned = sock_owned_by_user(&tsk->sk);
-			if (!owned)
-				bh_lock_sock(&tsk->sk);
+			bh_lock_sock(&tsk->sk);
 			if (p_ptr->connected)
 				abuf = port_build_self_abort_msg(p_ptr, err);
-			if(!owned)
-				bh_unlock_sock(&tsk->sk);
+			bh_unlock_sock(&tsk->sk);
 			tipc_net_route_msg(abuf);
 		}
 	}

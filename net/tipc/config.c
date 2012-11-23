@@ -38,6 +38,7 @@
 #include "port.h"
 #include "name_table.h"
 #include "config.h"
+#include "tunnel.h"
 
 #define REPLY_TRUNCATED "<truncated>\n"
 
@@ -162,6 +163,24 @@ static struct sk_buff *cfg_disable_bearer(void)
 	if (tipc_disable_bearer((char *)TLV_DATA(req_tlv_area)))
 		return tipc_cfg_reply_error_string("unable to disable bearer");
 
+	return tipc_cfg_reply_none();
+}
+
+static struct sk_buff *cfg_set_device(void)
+{
+	u32 enable;
+	struct work_struct *ws;
+
+	ws = kzalloc(sizeof(struct work_struct), GFP_ATOMIC);
+	if (!TLV_CHECK(req_tlv_area, req_tlv_space, TIPC_TLV_UNSIGNED) || !ws)
+		return tipc_cfg_reply_error_string(TIPC_CFG_TLV_ERROR);
+	enable = (ntohl(*(__be32 *)TLV_DATA(req_tlv_area)) != 0);
+
+	if (enable)
+		INIT_WORK(ws, tipc_dev_start);
+	else
+		INIT_WORK(ws, tipc_dev_stop);
+	schedule_work(ws);
 	return tipc_cfg_reply_none();
 }
 
@@ -317,6 +336,9 @@ struct sk_buff *tipc_cfg_do_cmd(u32 orig_node, u16 cmd, const void *request_area
 		break;
 	case TIPC_CMD_DISABLE_BEARER:
 		rep_tlv_buf = cfg_disable_bearer();
+		break;
+	case TIPC_CMD_SET_DEVICE:
+		rep_tlv_buf = cfg_set_device();
 		break;
 	case TIPC_CMD_SET_NODE_ADDR:
 		rep_tlv_buf = cfg_set_own_addr();

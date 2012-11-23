@@ -122,6 +122,7 @@
 #define  TIPC_CMD_SET_MAX_NODES     0x8009    /* obsoleted */
 #define  TIPC_CMD_SET_MAX_SLAVES    0x800A    /* obsoleted */
 #define  TIPC_CMD_SET_NETID         0x800B    /* tx unsigned, rx none */
+#define  TIPC_CMD_SET_DEVICE	    0x800C    /* tx unsigned, rx none */
 
 /*
  * Reserved commands:

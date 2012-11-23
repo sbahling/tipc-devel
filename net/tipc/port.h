@@ -37,10 +37,21 @@
 #ifndef _TIPC_PORT_H
 #define _TIPC_PORT_H
 
+#include <net/sock.h>
 #include "ref.h"
 #include "net.h"
 #include "msg.h"
 #include "node_subscr.h"
+
+struct tipc_sock {
+       struct sock sk;
+       struct tipc_port *p;
+       struct tipc_portid peer_name;
+       unsigned int conn_timeout;
+};
+
+#define tipc_sk(sk) ((struct tipc_sock *)(sk))
+#define tipc_sk_port(sk) (tipc_sk(sk)->p)
 
 #define TIPC_FLOW_CONTROL_WIN 512
 

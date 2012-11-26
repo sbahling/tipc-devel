@@ -59,6 +59,20 @@ struct tipc_dest
 	struct list_head chain;
 };
 
+/**
+ * struct pcpu_dstats - interface statistics
+ */
+struct pcpu_dstats {
+	u64			tx_packets;
+	u64			tx_bytes;
+	u64			tx_errors;
+	u64			tx_dropped;
+	u64			rx_packets;
+	u64			rx_bytes;
+	u64			rx_errors;
+	struct u64_stats_sync	syncp;
+};
+
 struct net_device *dev_tipc;
 struct socket *tunnel_sock;
 static struct sk_buff_head tx_queue;
@@ -184,6 +198,7 @@ static int tipc_recv_wh(void *data)
 	struct sockaddr_tipc r_addr;
 	struct sockaddr_storage ss;
 	struct tipc_dest *dest;
+	struct pcpu_dstats *dstats;
 	int res;
 
 	res = kernel_bind(tunnel_sock, (struct sockaddr*) &tipc_listen_addr,
@@ -232,14 +247,24 @@ static int tipc_recv_wh(void *data)
 		skb_pull(skb, msg_hdr_sz(buf_msg(skb)));
 		skb->mac_len = 0;			//TODO:remove?
 		skb_set_network_header(skb,0);
-		res = hash_gen_ip(skb, &ss, HASH_ON_SOURCE);
+		dstats = this_cpu_ptr(dev_tipc->dstats);
+		u64_stats_update_begin(&dstats->syncp);
+		if ((res = hash_gen_ip(skb, &ss, HASH_ON_SOURCE)) == -1)
+			goto rx_invalid;
 		dest = get_dest(res, &ss);
 		if (!dest)
 			allocate_dest(res, &ss, &r_addr);
-		if (set_skb_proto(skb))
+		if (set_skb_proto(skb)) {
+			dstats->rx_packets++;
+			dstats->rx_bytes += skb->len;
+			u64_stats_update_end(&dstats->syncp);
 			netif_rx(skb);
-		else
+		}else { 
+rx_invalid:
+			dstats->rx_errors++;
+			u64_stats_update_end(&dstats->syncp);
 			kfree_skb(skb);
+		}
 	}
 }
 
@@ -253,6 +278,7 @@ static int tipc_xmit_wh(void *data)
 	struct sockaddr_storage ss;
 	struct tipc_dest *dest;
 	struct tipc_port *tport;
+	struct pcpu_dstats *dstats;
 	struct kvec iov;
 	int res;
 
@@ -262,7 +288,14 @@ xmit:
 				 kthread_should_stop());
 	while (!skb_queue_empty(&tx_queue)) {
 		skb = skb_dequeue_tail(&tx_queue);
-		res = hash_gen_ip(skb, &ss, !HASH_ON_SOURCE);
+		if ((res = hash_gen_ip(skb, &ss, !HASH_ON_SOURCE)) == -1) {
+			dstats = this_cpu_ptr(dev_tipc->dstats);
+			u64_stats_update_begin(&dstats->syncp);
+			dstats->tx_errors++;
+			u64_stats_update_end(&dstats->syncp);
+			kfree_skb(skb);
+			goto xmit;
+		}
 		dest = get_dest(res, &ss);
 		tport = tipc_sk_port(tunnel_sock->sk);
 		iov.iov_base = skb->data;
@@ -290,6 +323,11 @@ again:
 			goto again;
 		}
 		release_sock(tunnel_sock->sk);
+		dstats = this_cpu_ptr(dev_tipc->dstats);
+		u64_stats_update_begin(&dstats->syncp);
+		dstats->tx_packets++;
+		dstats->tx_bytes += skb->len;
+		u64_stats_update_end(&dstats->syncp);
 		kfree_skb(skb);
 		if (skb_queue_len(&tx_queue) <= (DEVICE_TXQ / 2))
 			netif_wake_queue(dev_tipc);
@@ -361,6 +399,9 @@ void tipc_dev_stop(struct work_struct *work)
  */
 static int tipc_dev_init(struct net_device *dev)
 {
+	dev->dstats = alloc_percpu(struct pcpu_dstats);
+	if (!dev->dstats)
+		return -ENOMEM;
 	return 0;
 }
 
@@ -388,6 +429,7 @@ static void tipc_dev_setup(struct net_device *dev)
  */
 static void tipc_dev_free(struct net_device *dev)
 {
+	free_percpu(dev->dstats);
 	free_netdev(dev);
 }
 
@@ -412,6 +454,38 @@ static netdev_tx_t tipc_xmit(struct sk_buff *skb, struct net_device *dev)
 static struct rtnl_link_stats64 *tipc_get_stats64(struct net_device *dev,
 					struct rtnl_link_stats64 *stats)
 {
+	int i;
+	const struct pcpu_dstats *dstats;
+	u64 tbytes;
+	u64 tpackets;
+	u64 terrors;
+	u64 tdropped;
+	u64 rbytes;
+	u64 rpackets;
+	u64 rerrors;
+	unsigned int start;
+
+	for_each_possible_cpu(i) {
+		dstats = per_cpu_ptr(dev->dstats, i);
+		do {
+			start = u64_stats_fetch_begin(&dstats->syncp);
+			tbytes = dstats->tx_bytes;
+			tpackets = dstats->tx_packets;
+			terrors = dstats->tx_errors;
+			tdropped = dstats->tx_dropped;
+			rbytes = dstats->rx_bytes;
+			rpackets = dstats->rx_packets;
+			rerrors = dstats->rx_errors;
+		} while (u64_stats_fetch_retry(&dstats->syncp, start));
+		stats->tx_bytes += tbytes;
+		stats->tx_packets += tpackets;
+		stats->tx_errors += terrors;
+		stats->tx_dropped += tdropped;
+		stats->rx_bytes += rbytes;
+		stats->rx_packets += rpackets;
+		stats->rx_errors += rerrors;
+	}
 	return stats;
+
 }
 

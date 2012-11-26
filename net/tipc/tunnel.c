@@ -10,6 +10,10 @@
 
 #define DEVICE_MTU	(TIPC_MAX_USER_MSG_SIZE - 100)
 #define DEVICE_TXQ	255
+#define HASH_ON_SOURCE	1
+#define PORTID_HLIST_SIZE	512
+
+
 
 static void tipc_dev_setup(struct net_device *dev);
 static int tipc_dev_init(struct net_device *dev);
@@ -41,12 +45,27 @@ static struct sockaddr_tipc tipc_listen_addr = {
 	.scope = TIPC_ZONE_SCOPE
 };
 
+/**
+ * struct tipc_dest - ip to tipc portid mapping entry
+ * @ip:	IP address
+ * @portid: TIPC port ID
+ * @chain: Collision chain list
+ * @next: Next entry
+ */
+struct tipc_dest
+{
+	struct sockaddr_storage ip;
+	struct sockaddr_tipc portid;
+	struct list_head chain;
+};
 
 struct net_device *dev_tipc;
 struct socket *tunnel_sock;
 static struct sk_buff_head tx_queue;
 struct task_struct *ts_recv;
 struct task_struct *ts_xmit;
+static struct tipc_dest *portid_hlist[PORTID_HLIST_SIZE];
+
 
 static int set_skb_proto(struct sk_buff *skb)
 {
@@ -64,18 +83,113 @@ static int set_skb_proto(struct sk_buff *skb)
 }
 
 /**
+ * hash_gen_ip - calculate hash over source or dest ip
+ * @skb:	buffer holding the IP packet
+ * @ss:		output buffer holding the IP address
+ * @field:	select source or dest IP
+ */
+static int hash_gen_ip(struct sk_buff *skb, struct sockaddr_storage *ss,
+		       int field)
+{
+	struct sockaddr_in *v4;
+	struct sockaddr_in6 *v6;
+
+	memset(ss, 0, sizeof(struct sockaddr_storage));
+	switch (ip_hdr(skb)->version)
+	{
+		case 4:
+			v4 = (struct sockaddr_in*) ss;
+			v4->sin_family = AF_INET;
+			field == HASH_ON_SOURCE ?
+				(v4->sin_addr.s_addr = ip_hdr(skb)->saddr) :
+				(v4->sin_addr.s_addr = ip_hdr(skb)->daddr);
+			return jhash(&v4->sin_addr.s_addr,
+				     sizeof(struct in_addr), 0) &
+				     (PORTID_HLIST_SIZE - 1);
+			break;
+		case 6:
+			v6 = (struct sockaddr_in6*) ss;
+			v6->sin6_family = AF_INET6;
+			field == HASH_ON_SOURCE ?
+				memcpy(&v6->sin6_addr, &ipv6_hdr(skb)->saddr,
+				       sizeof(struct in6_addr)) :
+				memcpy(&v6->sin6_addr, &ipv6_hdr(skb)->daddr,
+				       sizeof(struct in6_addr));
+			return jhash(&v6->sin6_addr,
+				     sizeof(struct in6_addr), 0) &
+				     (PORTID_HLIST_SIZE - 1);
+			break;
+		default:
+			pr_err("Not an IP packet\n");
+		return -1;
+		break;
+	}
+	return -1;
+}
+
+/**
+ * get_dest - find an a destination entry based on ip
+ * @hash: remote ip hashv
+ * @ip:   remote ip
+ */
+static struct tipc_dest* get_dest(int hash, struct sockaddr_storage *ip)
+{
+	struct tipc_dest *entry_p;
+	struct list_head *chain;
+
+	entry_p = portid_hlist[hash];
+	if (!entry_p)
+		return NULL;
+	list_for_each(chain, &entry_p->chain) {
+		entry_p = list_entry(chain, struct tipc_dest, chain);
+		if (!memcmp(&entry_p->ip, ip, sizeof(struct sockaddr_storage)))
+			break;
+	}
+	return entry_p;
+}
+
+/**
+ * allocate_dest - allocate a new dest entry and add it to the list
+ * @hash: remote ip hashv
+ * @ip:   remote ip
+ * @id:   remote tipc portid
+ */
+static void allocate_dest(int hash, struct sockaddr_storage *ip,
+			struct sockaddr_tipc *portid)
+{
+	struct tipc_dest *new_p;
+
+	new_p = kzalloc(sizeof(struct tipc_dest), GFP_KERNEL);
+	if (!new_p) {
+		pr_err("out of memory!\n");
+		return;
+	}
+	memcpy(&new_p->ip, ip, sizeof(struct sockaddr_storage));
+	memcpy(&new_p->portid, portid, sizeof(struct sockaddr_tipc));
+	if (!portid_hlist[hash]) {
+		portid_hlist[hash] = new_p;
+		INIT_LIST_HEAD(&new_p->chain);
+		return;
+	}
+	list_add(&new_p->chain, &portid_hlist[hash]->chain);
+}
+
+/**
  * tipc_recv_wh - receive packets from the tipc socket and deliver to interface
  *
  */
 static int tipc_recv_wh(void *data)
 {
 	struct sk_buff *skb;
-	int ret;
+	struct sockaddr_tipc r_addr;
+	struct sockaddr_storage ss;
+	struct tipc_dest *dest;
+	int res;
 
-	ret = kernel_bind(tunnel_sock, (struct sockaddr*) &tipc_listen_addr,
+	res = kernel_bind(tunnel_sock, (struct sockaddr*) &tipc_listen_addr,
 			  sizeof(struct sockaddr_tipc));
-	if (ret < 0) {
-		pr_err("unable to bind kernel socket: %u\n", ret);
+	if (res < 0) {
+		pr_err("unable to bind kernel socket: %u\n", res);
 		return 0;
 	}
 
@@ -100,6 +214,13 @@ static int tipc_recv_wh(void *data)
 			kfree_skb(skb);
 			continue;
 		}
+		r_addr.family = AF_TIPC;
+		r_addr.addrtype = TIPC_ADDR_ID;
+		r_addr.addr.id.ref = msg_origport(buf_msg(skb));
+		r_addr.addr.id.node = msg_orignode(buf_msg(skb));
+		r_addr.addr.name.domain = 0;
+		r_addr.scope = 0;
+
 		skb_orphan(skb);
 		nf_reset(skb);
 		skb->skb_iif = 0;
@@ -111,6 +232,10 @@ static int tipc_recv_wh(void *data)
 		skb_pull(skb, msg_hdr_sz(buf_msg(skb)));
 		skb->mac_len = 0;			//TODO:remove?
 		skb_set_network_header(skb,0);
+		res = hash_gen_ip(skb, &ss, HASH_ON_SOURCE);
+		dest = get_dest(res, &ss);
+		if (!dest)
+			allocate_dest(res, &ss, &r_addr);
 		if (set_skb_proto(skb))
 			netif_rx(skb);
 		else
@@ -125,6 +250,8 @@ static int tipc_recv_wh(void *data)
 static int tipc_xmit_wh(void *data)
 {
 	struct sk_buff *skb;
+	struct sockaddr_storage ss;
+	struct tipc_dest *dest;
 	struct tipc_port *tport;
 	struct kvec iov;
 	int res;
@@ -135,16 +262,27 @@ xmit:
 				 kthread_should_stop());
 	while (!skb_queue_empty(&tx_queue)) {
 		skb = skb_dequeue_tail(&tx_queue);
+		res = hash_gen_ip(skb, &ss, !HASH_ON_SOURCE);
+		dest = get_dest(res, &ss);
 		tport = tipc_sk_port(tunnel_sock->sk);
 		iov.iov_base = skb->data;
 		iov.iov_len = skb->len;
 again:
 		lock_sock(tunnel_sock->sk);
-		res = tipc_multicast(tport->ref,
-				     &tipc_listen_addr.addr.nameseq,
-				     1,
-				     (const struct iovec*)&iov,
-				     skb->len);
+		if (dest) {
+			res = tipc_send2port(tport->ref,
+					     &dest->portid.addr.id,
+					     1,
+					     (const struct iovec*)&iov,
+					     skb->len);
+
+		} else {
+			res = tipc_multicast(tport->ref,
+					     &tipc_listen_addr.addr.nameseq,
+					     1,
+					     (const struct iovec*)&iov,
+					     skb->len);
+		}
 		if (unlikely(res == -ELINKCONG)) {
 			release_sock(tunnel_sock->sk);
 			wait_event_interruptible(*sk_sleep(tunnel_sock->sk),
@@ -176,6 +314,7 @@ int tipc_dev_start(struct work_struct *work)
 	err = sock_create_kern(AF_TIPC, SOCK_RDM, 0, &tunnel_sock);
 	if (err)
 		pr_err("error in sock create\n");
+	memset(portid_hlist, 0, (sizeof(struct tipc_dest*) * PORTID_HLIST_SIZE));
 
 	skb_queue_head_init(&tx_queue);
 	ts_recv = kthread_run(tipc_recv_wh, NULL, "tipc_recv_wh");

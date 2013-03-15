@@ -400,7 +400,6 @@ restart:
 	b_ptr->identity = bearer_id;
 	b_ptr->media = m_ptr;
 	b_ptr->tolerance = m_ptr->tolerance;
-	b_ptr->window = m_ptr->window;
 	b_ptr->net_plane = bearer_id + 'A';
 	b_ptr->active = 1;
 	b_ptr->priority = priority;

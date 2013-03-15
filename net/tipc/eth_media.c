@@ -202,6 +202,16 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 	eb_ptr->bearer = tb_ptr;
 	tb_ptr->usr_handle = (void *)eb_ptr;
 	tb_ptr->mtu = dev->mtu;
+	/* The default link window can be overriden by the media value
+	 * but can never exceed 3/4 of the interface tx queue length.
+	 */
+	if (eth_media_info.window)
+		tb_ptr->window = min((u32) (dev->tx_queue_len*3/4),
+				     (u32) eth_media_info.window);
+	else
+		tb_ptr->window = clamp((u32) (dev->tx_queue_len*3/4),
+				       (u32) TIPC_MIN_LINK_WIN,
+				       (u32) TIPC_MAX_LINK_WIN);
 	tb_ptr->blocked = 0;
 	eth_media_addr_set(&tb_ptr->addr, (char *)dev->dev_addr);
 	return 0;
@@ -358,7 +368,7 @@ static struct tipc_media eth_media_info = {
 			    TIPC_MEDIA_TYPE_ETH, 1 },
 	.priority	= TIPC_DEF_LINK_PRI,
 	.tolerance	= TIPC_DEF_LINK_TOL,
-	.window		= TIPC_DEF_LINK_WIN,
+	.window		= 0,
 	.type_id	= TIPC_MEDIA_TYPE_ETH,
 	.name		= "eth"
 };

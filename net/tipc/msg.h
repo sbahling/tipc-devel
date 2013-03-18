@@ -610,6 +610,17 @@ static inline void msg_set_link_selector(struct tipc_msg *m, u32 n)
 /*
  * Word 5
  */
+
+static inline u32 msg_window(struct tipc_msg *m)
+{
+	return msg_bits(m, 5, 8, 0x1fff);
+}
+
+static inline void msg_set_window(struct tipc_msg *m, u32 win)
+{
+	msg_set_bits(m, 5, 8, 0x1fff, win);
+}
+
 static inline u32 msg_session(struct tipc_msg *m)
 {
 	return msg_bits(m, 5, 16, 0xffff);

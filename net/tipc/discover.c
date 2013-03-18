@@ -85,6 +85,7 @@ static struct sk_buff *tipc_disc_init_msg(u32 type,
 		msg_set_dest_domain(msg, dest_domain);
 		msg_set_bc_netid(msg, tipc_net_id);
 		b_ptr->media->addr2msg(&b_ptr->addr, msg_media_addr(msg));
+		msg_set_window(msg, b_ptr->arwindow);
 	}
 	return buf;
 }
@@ -127,6 +128,7 @@ void tipc_disc_recv_msg(struct sk_buff *buf, struct tipc_bearer *b_ptr)
 	u32 signature = msg_node_sig(msg);
 	int addr_mismatch;
 	int link_fully_up;
+	u32 window;
 
 	media_addr.broadcast = 1;
 	b_ptr->media->msg2addr(b_ptr, &media_addr, msg_media_addr(msg));
@@ -228,9 +230,10 @@ void tipc_disc_recv_msg(struct sk_buff *buf, struct tipc_bearer *b_ptr)
 		}
 	}
 
+	window = min(msg_window(msg), b_ptr->window);
 	/* Create a link endpoint for this bearer, if necessary */
 	if (!link) {
-		link = tipc_link_create(n_ptr, b_ptr, &media_addr);
+		link = tipc_link_create(n_ptr, b_ptr, &media_addr, window);
 		if (!link) {
 			tipc_node_unlock(n_ptr);
 			return;

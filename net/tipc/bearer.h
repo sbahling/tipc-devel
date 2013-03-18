@@ -115,6 +115,7 @@ struct tipc_media {
  * @media: ptr to media structure associated with bearer
  * @priority: default link priority for bearer
  * @window: default window size for bearer
+ * @arwindow: advertised receive window for bearer
  * @tolerance: default link tolerance for bearer
  * @identity: array index of this bearer within TIPC bearer array
  * @link_req: ptr to (optional) structure making periodic link setup requests
@@ -138,6 +139,7 @@ struct tipc_bearer {
 	struct tipc_media_addr bcast_addr;
 	u32 priority;
 	u32 window;
+	u32 arwindow;
 	u32 tolerance;
 	u32 identity;
 	struct tipc_link_req *link_req;

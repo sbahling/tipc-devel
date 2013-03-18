@@ -218,6 +218,19 @@ static int enable_bearer(struct tipc_bearer *tb_ptr)
 		tb_ptr->window = clamp((u32) (dev->tx_queue_len*3/4),
 				       (u32) TIPC_MIN_LINK_WIN,
 				       (u32) TIPC_MAX_LINK_WIN);
+	if (!dev->ethtool_ops->get_ringparam) {
+		pr_info("Could not get ring parameters from %s\n",
+			driver_name);
+		tb_ptr->arwindow = TIPC_DEF_LINK_WIN;
+	} else {
+		struct ethtool_ringparam rp = {
+			.cmd = ETHTOOL_GRINGPARAM
+			};
+		dev->ethtool_ops->get_ringparam(dev, &rp);
+		tb_ptr->arwindow = clamp((u32) (rp.rx_pending*3/4),
+					 (u32) TIPC_MIN_LINK_WIN,
+					 (u32) TIPC_MAX_LINK_WIN);
+	}
 	tb_ptr->blocked = 0;
 	eth_media_addr_set(tb_ptr, &tb_ptr->addr, (char *)dev->dev_addr);
 	return 0;

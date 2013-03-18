@@ -208,7 +208,8 @@ struct tipc_port;
 
 struct tipc_link *tipc_link_create(struct tipc_node *n_ptr,
 			      struct tipc_bearer *b_ptr,
-			      const struct tipc_media_addr *media_addr);
+			      const struct tipc_media_addr *media_addr,
+			      u32 window);
 void tipc_link_delete(struct tipc_link *l_ptr);
 void tipc_link_changeover(struct tipc_link *l_ptr);
 void tipc_link_send_duplicate(struct tipc_link *l_ptr, struct tipc_link *dest);

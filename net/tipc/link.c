@@ -289,12 +289,14 @@ static void link_set_timer(struct tipc_link *l_ptr, u32 time)
  * @n_ptr: pointer to associated node
  * @b_ptr: pointer to associated bearer
  * @media_addr: media address to use when sending messages over link
+ * @window: link window suggested by peer
  *
  * Returns pointer to link.
  */
 struct tipc_link *tipc_link_create(struct tipc_node *n_ptr,
 			      struct tipc_bearer *b_ptr,
-			      const struct tipc_media_addr *media_addr)
+			      const struct tipc_media_addr *media_addr,
+			      u32 window)
 {
 	struct tipc_link *l_ptr;
 	struct tipc_msg *msg;
@@ -346,7 +348,7 @@ struct tipc_link *tipc_link_create(struct tipc_node *n_ptr,
 	strcpy((char *)msg_data(msg), if_name);
 
 	l_ptr->priority = b_ptr->priority;
-	tipc_link_set_queue_limits(l_ptr, b_ptr->window);
+	tipc_link_set_queue_limits(l_ptr, window);
 
 	link_init_max_pkt(l_ptr);
 

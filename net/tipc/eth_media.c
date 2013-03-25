@@ -36,6 +36,8 @@
 
 #include "core.h"
 #include "bearer.h"
+#include "msg.h"
+#include <net/protocol.h>
 
 #define MAX_ETH_BEARERS		MAX_BEARERS
 
@@ -371,6 +373,127 @@ static struct tipc_media eth_media_info = {
 	.name		= "eth"
 };
 
+static struct sk_buff **conn_gro_receive(struct sk_buff **head,
+				       struct sk_buff *skb)
+{
+	unsigned int off;
+	unsigned int hlen;
+	unsigned int len;
+	struct sk_buff **pp = NULL;
+	struct sk_buff *p;
+	struct tipc_msg *msg;
+	struct tipc_msg *th;
+	struct tipc_msg *th2;
+	unsigned int thlen;
+	int flush = 1;
+
+	msg = buf_msg(skb);
+	thlen = msg_hdr_sz(msg);
+	off = skb_gro_offset(skb);
+	hlen = off + msg_hdr_sz(msg);
+	th = skb_gro_header_fast(skb, off);
+	if (skb_gro_header_hard(skb, hlen)) {
+		th = skb_gro_header_slow(skb, hlen, off);
+		if (unlikely(!th))
+			goto out;
+	}
+
+	skb_gro_pull(skb, thlen);
+	len = skb_gro_len(skb);
+	for (; (p = *head); head = &p->next) {
+		if (!NAPI_GRO_CB(p)->same_flow)
+			continue;
+		th2 = buf_msg(p);
+		if ((msg_origport(th) ^ msg_origport(th2)) |
+		    (msg_destport(th) ^ msg_destport(th2)) |
+		    (msg_prevnode(th) ^ msg_prevnode(th2))) {
+			NAPI_GRO_CB(p)->same_flow = 0;
+			continue;
+		}
+		goto found;
+	}
+	goto out_check_final;
+
+found:
+	flush = NAPI_GRO_CB(p)->flush;
+	flush |= ((msg_seqno(th2) + NAPI_GRO_CB(p)->count) ^ msg_seqno(th));
+	flush |= (msg_errcode(msg) != 0);
+	if (flush || skb_gro_receive(head, skb))
+		goto out_check_final;
+	p = *head;
+	th2 = buf_msg(p);
+
+out_check_final:
+	flush = (msg_errcode(msg) != 0);
+	if (p && (!NAPI_GRO_CB(skb)->same_flow || flush))
+		pp = head;
+out:
+	NAPI_GRO_CB(skb)->flush |= flush;
+	return pp;
+}
+
+static int conn_gro_complete(struct sk_buff *skb)
+{
+	struct tipc_msg *msg;
+	__be32 newlen;
+
+	msg = buf_msg(skb);
+	newlen = skb->len - skb_network_offset(skb);
+	msg_set_size(msg, newlen);
+	skb_shinfo(skb)->gso_segs = NAPI_GRO_CB(skb)->count;
+	skb_shinfo(skb)->gso_type = SKB_GSO_TIPC;
+	return 0;
+}
+
+/**
+ * tipc_gro_receive - GRO accumulation of TIPC packets
+ *
+ * head: list of currently held packets
+ * skb: the new packet
+ */
+static struct sk_buff **tipc_gro_receive(struct sk_buff **head,
+					 struct sk_buff *skb)
+{
+	struct tipc_msg *msg;
+
+	msg = buf_msg(skb);
+	if (!msg_isdata(msg))
+		goto out;
+	if (msg_type(msg) == TIPC_CONN_MSG)
+		return conn_gro_receive(head, skb);
+out:
+	NAPI_GRO_CB(skb)->flush |= 1;
+	return NULL;
+}
+
+/**
+ * tipc_gro_complete - napi poll interval ended, flush GRO'd packets
+ *
+ * skb: head of GRO buffer chain
+ */
+static int tipc_gro_complete(struct sk_buff *skb)
+{
+	struct tipc_msg *msg;
+
+	msg = buf_msg(skb);
+	if (!msg_isdata(msg))
+		goto out_err;
+	if (msg_type(msg) == TIPC_CONN_MSG)
+		return conn_gro_complete(skb);
+out_err:
+	pr_err("non data message GRO'd\n");
+	dump_stack();
+	return -ENOSYS;
+}
+
+static struct packet_offload tipc_packet_offload __read_mostly = {
+		.type = cpu_to_be16(ETH_P_TIPC),
+		.callbacks = {
+			.gro_receive = tipc_gro_receive,
+			.gro_complete = tipc_gro_complete,
+		},
+};
+
 /**
  * tipc_eth_media_start - activate Ethernet bearer support
  *
@@ -388,6 +511,8 @@ int tipc_eth_media_start(void)
 	if (res)
 		return res;
 
+	dev_add_offload(&tipc_packet_offload);
+
 	res = register_netdevice_notifier(&notifier);
 	if (!res)
 		eth_started = 1;
@@ -401,8 +526,8 @@ void tipc_eth_media_stop(void)
 {
 	if (!eth_started)
 		return;
-
 	flush_scheduled_work();
+	dev_remove_offload(&tipc_packet_offload);
 	unregister_netdevice_notifier(&notifier);
 	eth_started = 0;
 }

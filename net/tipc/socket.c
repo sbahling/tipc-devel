@@ -893,6 +893,7 @@ static int recv_msg(struct kiocb *iocb, struct socket *sock,
 	unsigned int sz;
 	u32 err;
 	int res;
+	u32 buf_segs;
 
 	/* Catch invalid receive requests */
 	if (unlikely(!buf_len))
@@ -930,6 +931,7 @@ restart:
 
 	/* Look at first message in receive queue */
 	buf = skb_peek(&sk->sk_receive_queue);
+	buf_segs = 1;
 	msg = buf_msg(buf);
 	sz = msg_data_sz(msg);
 	err = msg_errcode(msg);
@@ -966,11 +968,13 @@ restart:
 		else
 			res = -ECONNRESET;
 	}
-
+	if (skb_shinfo(buf)->gso_segs)
+		buf_segs = skb_shinfo(buf)->gso_segs;
+	tport->conn_unacked += buf_segs;
 	/* Consume received message (optional) */
 	if (likely(!(flags & MSG_PEEK))) {
 		if ((sock->state != SS_READY) &&
-		    (++tport->conn_unacked >= TIPC_FLOW_CONTROL_WIN))
+		    (tport->conn_unacked >= TIPC_FLOW_CONTROL_WIN))
 			tipc_acknowledge(tport->ref, tport->conn_unacked);
 		advance_rx_queue(sk);
 	}
@@ -1004,6 +1008,7 @@ static int recv_stream(struct kiocb *iocb, struct socket *sock,
 	int sz_copied = 0;
 	u32 err;
 	int res = 0;
+	u32 buf_segs;
 
 	/* Catch invalid receive attempts */
 	if (unlikely(!buf_len))
@@ -1043,6 +1048,7 @@ restart:
 
 	/* Look at first message in receive queue */
 	buf = skb_peek(&sk->sk_receive_queue);
+	buf_segs = 1;
 	msg = buf_msg(buf);
 	sz = msg_data_sz(msg);
 	err = msg_errcode(msg);
@@ -1091,10 +1097,13 @@ restart:
 		else
 			res = -ECONNRESET;
 	}
+	if (skb_shinfo(buf)->gso_segs)
+		buf_segs = skb_shinfo(buf)->gso_segs;
+	tport->conn_unacked += buf_segs;
 
 	/* Consume received message (optional) */
 	if (likely(!(flags & MSG_PEEK))) {
-		if (unlikely(++tport->conn_unacked >= TIPC_FLOW_CONTROL_WIN))
+		if (unlikely(tport->conn_unacked >= TIPC_FLOW_CONTROL_WIN))
 			tipc_acknowledge(tport->ref, tport->conn_unacked);
 		advance_rx_queue(sk);
 	}

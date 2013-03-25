@@ -692,6 +692,7 @@ static void port_dispatcher_sigh(void *dummy)
 		int peer_invalid;
 		int published;
 		u32 message_type;
+		u32 port_segs = 1;
 
 		struct sk_buff *next = buf->next;
 		struct tipc_msg *msg = buf_msg(buf);
@@ -731,8 +732,11 @@ static void port_dispatcher_sigh(void *dummy)
 				} else if (peer_invalid)
 					goto reject;
 				dsz = msg_data_sz(msg);
+				if (skb_shinfo(buf)->gso_segs)
+					port_segs = skb_shinfo(buf)->gso_segs;
+				p_ptr->conn_unacked += port_segs;
 				if (unlikely(dsz &&
-					     (++p_ptr->conn_unacked >=
+					     (p_ptr->conn_unacked >=
 					      TIPC_FLOW_CONTROL_WIN)))
 					tipc_acknowledge(dref,
 							 p_ptr->conn_unacked);

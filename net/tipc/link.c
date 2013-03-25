@@ -1623,6 +1623,7 @@ void tipc_recv_msg(struct sk_buff *head, struct tipc_bearer *b_ptr)
 		struct tipc_msg *msg;
 		u32 seq_no;
 		u32 ackd;
+		u32 link_segs = 1;
 		u32 released = 0;
 		int type;
 
@@ -1709,7 +1710,10 @@ void tipc_recv_msg(struct sk_buff *head, struct tipc_bearer *b_ptr)
 			tipc_link_push_queue(l_ptr);
 		if (unlikely(!list_empty(&l_ptr->waiting_ports)))
 			tipc_link_wakeup_ports(l_ptr, 0);
-		if (unlikely(++l_ptr->unacked_window >= TIPC_MIN_LINK_WIN)) {
+		if (skb_shinfo(buf)->gso_segs)
+			link_segs = skb_shinfo(buf)->gso_segs;
+		l_ptr->unacked_window += link_segs;
+		if (unlikely(l_ptr->unacked_window >= TIPC_MIN_LINK_WIN)) {
 			l_ptr->stats.sent_acks++;
 			tipc_link_send_proto_msg(l_ptr, STATE_MSG, 0, 0, 0, 0, 0);
 		}
@@ -1718,7 +1722,7 @@ void tipc_recv_msg(struct sk_buff *head, struct tipc_bearer *b_ptr)
 protocol_check:
 		if (likely(link_working_working(l_ptr))) {
 			if (likely(seq_no == mod(l_ptr->next_in_no))) {
-				l_ptr->next_in_no++;
+				l_ptr->next_in_no += link_segs;
 				if (unlikely(l_ptr->oldest_deferred_in))
 					head = link_insert_deferred_queue(l_ptr,
 									  head);

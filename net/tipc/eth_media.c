@@ -36,6 +36,8 @@
 
 #include "core.h"
 #include "bearer.h"
+#include "msg.h"
+#include <net/protocol.h>
 
 #define MAX_ETH_BEARERS		MAX_BEARERS
 
@@ -386,6 +388,217 @@ static struct tipc_media eth_media_info = {
 	.name		= "eth"
 };
 
+
+static struct sk_buff **rdm_gro_receive(struct sk_buff **head,
+				       struct sk_buff *skb)
+{
+	unsigned int off;
+	unsigned int hlen;
+	struct tipc_msg *msg;
+
+	msg = buf_msg(skb);
+
+	off = skb_gro_offset(skb);
+	hlen = off + msg_hdr_sz(msg);
+	return NULL;
+}
+static int rdm_gro_complete(struct sk_buff *skb)
+{
+	return 0;
+}
+
+//TODO: bake these into an array of some sort
+struct net_offload rdm_offload = {
+	.callbacks = {
+		.gro_receive = rdm_gro_receive,
+		.gro_complete = rdm_gro_complete,
+	},
+};
+/*
+struct net_offload frag_offload = {
+	.callbacks = {
+		.gro_receive = frag_gro_receive,
+		.gro_complete = frag_gro_complete,
+	},
+};
+*/
+
+static struct sk_buff **conn_gro_receive(struct sk_buff **head,
+				       struct sk_buff *skb)
+{
+	unsigned int off;
+	unsigned int hlen;
+	unsigned int len;
+	struct sk_buff **pp = NULL;
+	struct sk_buff *p;
+	struct tipc_msg *msg;
+	struct tipc_msg *th;
+	struct tipc_msg *th2;
+	unsigned int thlen;
+	int flush = 1;
+
+	pr_info("conn_gro_receive\n");
+	msg = buf_msg(skb);
+	off = skb_gro_offset(skb);
+	hlen = off + msg_hdr_sz(msg);
+	th = skb_gro_header_fast(skb, off);
+	if (skb_gro_header_hard(skb, hlen)) {
+		th = skb_gro_header_slow(skb, hlen, off);
+		if (unlikely(!th)){
+			pr_info("gro_header failed 1\n");
+			goto out;
+		}
+	}
+	thlen = msg_hdr_sz(th);
+	hlen = off + thlen;
+	if (skb_gro_header_hard(skb, hlen)) {
+		th = skb_gro_header_slow(skb, hlen, off);
+		if (unlikely(!th)){
+			pr_info("gro_header failed 2\n");
+			goto out;
+		}
+	}
+
+	skb_gro_pull(skb, thlen);
+	len = skb_gro_len(skb);
+	for (; (p = *head); head = &p->next) {
+		if (!NAPI_GRO_CB(p)->same_flow)
+			continue;
+		th2 = buf_msg(p);
+		
+		if ((msg_origport(th) ^ msg_origport(th2)) |
+		    (msg_destport(th) ^ msg_destport(th2)) |
+		    (msg_prevnode(th) ^ msg_prevnode(th2))) {
+			NAPI_GRO_CB(p)->same_flow = 0;
+			pr_info("packets are not for the same flow\n");
+			continue;
+		}
+		pr_info("goto found\n");
+		goto found;
+	}
+	goto out_check_final;
+
+found:
+	flush = NAPI_GRO_CB(p)->flush;
+	flush |= ((ntohl(msg_seqno(th2)) + skb_gro_len(p)) ^ ntohl(msg_seqno(th)));
+	if (flush || skb_gro_receive(head, skb))
+		goto out_check_final;
+	p = *head;
+	th2 = buf_msg(p);
+
+out_check_final:
+	flush |= (msg_errcode(msg) != 0);
+	
+	if (p && (!NAPI_GRO_CB(skb)->same_flow || flush)){
+		pr_info("packets are not for the same flow, or flush is set\n");
+		pp = head;
+	}
+
+out:
+	NAPI_GRO_CB(skb)->flush |= flush;
+	pr_info("conn_gro_receive returns %p, head = %p, skb=%p\n", pp,
+			head, skb);
+	return pp;
+}
+static int conn_gro_complete(struct sk_buff *skb)
+{
+	struct tipc_msg *msg;
+	__be32 newlen;
+
+	msg = buf_msg(skb);
+	newlen = htons(skb->len - skb_network_offset(skb));
+	pr_info("conn_gro_complete:update length to %d\n",newlen);
+	msg_set_size(msg, newlen);
+	skb_shinfo(skb)->gso_segs = NAPI_GRO_CB(skb)->count;
+	return 0;
+}
+
+struct net_offload conn_offload = {
+	.callbacks = {
+		.gro_receive = conn_gro_receive,
+		.gro_complete = conn_gro_complete,
+	},
+};
+
+
+/**
+ *head: list of currently held packets
+ *skb: the new packet
+ */
+static struct sk_buff **tipc_gro_receive(struct sk_buff **head,
+					 struct sk_buff *skb)
+{
+	struct sk_buff **pp = NULL;
+	struct sk_buff *p;
+	struct tipc_msg *msg;
+	int flush = 1;
+	unsigned int off;
+	unsigned int hlen;
+	struct tipc_msg *hdr;
+
+	msg = buf_msg(skb);
+
+	off = skb_gro_offset(skb);
+	hlen = off + msg_hdr_sz(msg);
+	hdr = skb_gro_header_fast(skb, off);
+	if (skb_gro_header_hard(skb, off)) {
+		hdr = skb_gro_header_slow(skb, hlen, off);
+		if (unlikely (!hdr)){
+			pr_err("gro header creation failed\n");
+			goto out;
+		}
+	}
+	if (!msg_isdata(msg))
+		goto out;
+	switch(msg_type(msg)) {
+		case TIPC_CONN_MSG:
+			pr_info("gro_receive for TIPC_CONN_MSG\n");
+			pp = conn_offload.callbacks.gro_receive(head, skb);
+			break;
+		default:
+		goto out;
+		break;
+	}
+	/*Do stuff per msg_type here*/
+	goto out;
+
+
+out:
+	NAPI_GRO_CB(skb)->flush |= flush;
+	return pp;
+}
+
+static int tipc_gro_complete(struct sk_buff *skb)
+{
+	struct tipc_msg *msg;
+	int err = -ENOSYS;
+	msg = buf_msg(skb);
+	pr_info("tipc_gro_complete for message type %d\n", msg_type(msg));
+	if (!msg_isdata(msg)) {
+		pr_err("non-data message GRO'd\n");
+		dump_stack();
+	}
+	switch(msg_type(msg)){
+		case TIPC_CONN_MSG:
+			pr_info("gro_complete for TIPC_CONN_MSG\n");
+			err = conn_offload.callbacks.gro_complete(skb);
+			break;
+		default:
+		return 0;
+		break;
+	}
+	return err;
+}
+
+static struct packet_offload tipc_packet_offload __read_mostly = {
+		.type = cpu_to_be16(ETH_P_TIPC),
+		.callbacks = {
+//			.gso_send_check = tipc_gso_send_check,
+//			.gso_segment = tipc_gso_segment,
+			.gro_receive = tipc_gro_receive,
+			.gro_complete = tipc_gro_complete,
+		},
+};
 /**
  * tipc_eth_media_start - activate Ethernet bearer support
  *
@@ -402,6 +615,8 @@ int tipc_eth_media_start(void)
 	res = tipc_register_media(&eth_media_info);
 	if (res)
 		return res;
+
+	dev_add_offload(&tipc_packet_offload);
 
 	res = register_netdevice_notifier(&notifier);
 	if (!res)

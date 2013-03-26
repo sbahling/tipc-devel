@@ -1584,11 +1584,15 @@ static int link_recv_buf_validate(struct sk_buff *buf)
 		return 0;
 
 	msg = skb_header_pointer(buf, 0, sizeof(tipc_hdr), tipc_hdr);
-	if (msg == NULL)
+	if (msg == NULL){
+		pr_err("skb_header_pointer error\n");
 		return 0;
+	}
 
-	if (unlikely(msg_version(msg) != TIPC_VERSION))
+	if (unlikely(msg_version(msg) != TIPC_VERSION)) {
+		pr_err("version error\n");
 		return 0;
+	}
 
 	size = msg_size(msg);
 	hdr_size = msg_hdr_sz(msg);
@@ -1598,8 +1602,12 @@ static int link_recv_buf_validate(struct sk_buff *buf)
 	if (unlikely((hdr_size < min_hdr_size) ||
 		     (size < hdr_size) ||
 		     (buf->len < size) ||
-		     (size - hdr_size > TIPC_MAX_USER_MSG_SIZE)))
+		     (size - hdr_size > TIPC_MAX_USER_MSG_SIZE))){
+		pr_err("size error\n");
+		pr_err("hdr_size=%u min_hdr_size=%u size=%u buf->len=%u\n",
+			hdr_size, min_hdr_size, size, buf->len);
 		return 0;
+	}
 
 	return pskb_may_pull(buf, hdr_size);
 }
@@ -1633,12 +1641,16 @@ void tipc_recv_msg(struct sk_buff *head, struct tipc_bearer *b_ptr)
 			goto cont;
 
 		/* Ensure message is well-formed */
-		if (unlikely(!link_recv_buf_validate(buf)))
+		if (unlikely(!link_recv_buf_validate(buf))){
+			pr_err("recv_buf_validate failed\n");
 			goto cont;
+		}
 
 		/* Ensure message data is a single contiguous unit */
-		if (unlikely(skb_linearize(buf)))
+		if (unlikely(skb_linearize(buf))) {
+			pr_err("skb_linearize failed\n");
 			goto cont;
+		}
 
 		/* Handle arrival of a non-unicast link message */
 		msg = buf_msg(buf);
@@ -1718,7 +1730,9 @@ void tipc_recv_msg(struct sk_buff *head, struct tipc_bearer *b_ptr)
 protocol_check:
 		if (likely(link_working_working(l_ptr))) {
 			if (likely(seq_no == mod(l_ptr->next_in_no))) {
-				l_ptr->next_in_no++;
+				/*FIXME Next packet to expect is last gro'd skb +1*/
+				//l_ptr->next_in_no++;
+				l_ptr->next_in_no += NAPI_GRO_CB(buf)->count;
 				if (unlikely(l_ptr->oldest_deferred_in))
 					head = link_insert_deferred_queue(l_ptr,
 									  head);

@@ -696,7 +696,8 @@ static void port_dispatcher_sigh(void *dummy)
 		struct sk_buff *next = buf->next;
 		struct tipc_msg *msg = buf_msg(buf);
 		u32 dref = msg_destport(msg);
-
+		pr_debug("port_dispatcher_sigh gso_segs= %d\n",
+			skb_shinfo(buf)->gso_segs);
 		message_type = msg_type(msg);
 		if (message_type > TIPC_DIRECT_MSG)
 			goto reject;	/* Unsupported message type */
@@ -731,8 +732,16 @@ static void port_dispatcher_sigh(void *dummy)
 				} else if (peer_invalid)
 					goto reject;
 				dsz = msg_data_sz(msg);
+				pr_debug("conn_msg received of %d segs\n", skb_shinfo(buf)->gso_segs);
+				if (skb_shinfo(buf)->gso_segs){
+					pr_debug("port received gro'd message of %d segs\n",
+							skb_shinfo(buf)->gso_segs);
+					p_ptr->conn_unacked+=skb_shinfo(buf)->gso_segs;
+				}
+				else
+					p_ptr->conn_unacked++;
 				if (unlikely(dsz &&
-					     (++p_ptr->conn_unacked >=
+					     (p_ptr->conn_unacked >=
 					      TIPC_FLOW_CONTROL_WIN)))
 					tipc_acknowledge(dref,
 							 p_ptr->conn_unacked);
@@ -842,6 +851,8 @@ static u32 port_dispatcher(struct tipc_port *dummy, struct sk_buff *buf)
 		msg_queue_tail = buf;
 	} else {
 		msg_queue_tail = msg_queue_head = buf;
+			pr_debug("port_dispatcher gso_segs= %d\n",
+			skb_shinfo(buf)->gso_segs);
 		tipc_k_signal((Handler)port_dispatcher_sigh, 0);
 	}
 	spin_unlock_bh(&queue_lock);
@@ -1152,12 +1163,13 @@ int tipc_port_recv_msg(struct sk_buff *buf)
 	u32 dsz = msg_data_sz(msg);
 	u32 err;
 
+	pr_debug("tipc_port_recv_msg gso_segs= %d\n",
+		skb_shinfo(buf)->gso_segs);
 	/* forward unresolved named message */
 	if (unlikely(!destport)) {
 		tipc_net_route_msg(buf);
 		return dsz;
 	}
-
 	/* validate destination & pass to port, otherwise reject message */
 	p_ptr = tipc_port_lock(destport);
 	if (likely(p_ptr)) {

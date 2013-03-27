@@ -1732,10 +1732,18 @@ protocol_check:
 			if (likely(seq_no == mod(l_ptr->next_in_no))) {
 				/*FIXME Next packet to expect is last gro'd skb +1*/
 				//l_ptr->next_in_no++;
-				l_ptr->next_in_no += NAPI_GRO_CB(buf)->count;
-				if (unlikely(l_ptr->oldest_deferred_in))
+				pr_debug("next expected seq was=%u\n", l_ptr->next_in_no);
+				if(skb_shinfo(buf)->gso_segs)
+					l_ptr->next_in_no += skb_shinfo(buf)->gso_segs;
+				else
+					l_ptr->next_in_no++;
+				pr_debug("next=%u\n", l_ptr->next_in_no);
+				if (unlikely(l_ptr->oldest_deferred_in)){
 					head = link_insert_deferred_queue(l_ptr,
 									  head);
+					pr_debug("deferring packet (def q size=%u)\n",
+							l_ptr->deferred_inqueue_sz);
+				}
 deliver:
 				if (likely(msg_isdata(msg))) {
 					tipc_node_unlock(n_ptr);

@@ -437,41 +437,26 @@ static struct sk_buff **conn_gro_receive(struct sk_buff **head,
 	unsigned int thlen;
 	int flush = 1;
 
-	pr_info("conn_gro_receive\n");
+	pr_debug("conn_gro_receive\n");
 
 	msg = buf_msg(skb);
 	thlen = msg_hdr_sz(msg);
-	/*
-	pr_info("skb oport=%u \n", msg_origport(msg));
-	pr_info("skb dport=%u \n", msg_destport(msg));
-	pr_info("skb pnode=0x%x \n", msg_prevnode(msg));
-	*/
 	off = skb_gro_offset(skb);
 	hlen = off + msg_hdr_sz(msg);
 	th = skb_gro_header_fast(skb, off);
 	if (skb_gro_header_hard(skb, hlen)) {
 		th = skb_gro_header_slow(skb, hlen, off);
 		if (unlikely(!th)){
-			pr_info("gro_header failed 1\n");
+			pr_err("gro_header failed 1\n");
 			goto out;
 		}
 	}
-	/*
-	thlen = msg_hdr_sz(th);
-	hlen = off + thlen;
-	if (skb_gro_header_hard(skb, hlen)) {
-		th = skb_gro_header_slow(skb, hlen, off);
-		if (unlikely(!th)){
-			pr_info("gro_header failed 2\n");
-			goto out;
-		}
-	}*/
 
 	skb_gro_pull(skb, thlen);
 	len = skb_gro_len(skb);
-	pr_info("head=%p\n",*head);
+	pr_debug("head=%p\n",*head);
 	for (; (p = *head); head = &p->next) {
-		pr_info("p=%p, skb=%p\n", p, skb);
+		pr_debug("p=%p, skb=%p\n", p, skb);
 		if (!NAPI_GRO_CB(p)->same_flow)
 			continue;
 		th2 = buf_msg(p);
@@ -480,26 +465,28 @@ static struct sk_buff **conn_gro_receive(struct sk_buff **head,
 		    (msg_destport(th) ^ msg_destport(th2)) |
 		    (msg_prevnode(th) ^ msg_prevnode(th2))) {
 			NAPI_GRO_CB(p)->same_flow = 0;
-			pr_info("packets are not for the same flow\n");
-			pr_info("th oport=%u th2 oport=%u\n", msg_origport(th), msg_origport(th2));
-			pr_info("th dport=%u th2 dport=%u\n", msg_destport(th), msg_destport(th2));
-			pr_info("th pnode=0x%x th2 pnode=0x%x\n", msg_prevnode(th), msg_prevnode(th2));
+			
+			pr_debug("packets are not for the same flow\n");
+			pr_debug("th oport=%u th2 oport=%u\n", msg_origport(th), msg_origport(th2));
+			pr_debug("th dport=%u th2 dport=%u\n", msg_destport(th), msg_destport(th2));
+			pr_debug("th pnode=0x%x th2 pnode=0x%x\n", msg_prevnode(th), msg_prevnode(th2));
+			
 			continue;
 		}
-		pr_info("goto found\n");
+		pr_debug("goto found\n");
 		goto found;
 	}
 	goto out_check_final;
 
 found:
 	flush = NAPI_GRO_CB(p)->flush;
-	pr_info("flush is %d\n", flush);
-	pr_info("Matching packets:\n");
-	pr_info("th oport=%u th2 oport=%u\n", msg_origport(th), msg_origport(th2));
-	pr_info("th dport=%u th2 dport=%u\n", msg_destport(th), msg_destport(th2));
-	pr_info("th pnode=0x%x th2 pnode=0x%x\n", msg_prevnode(th), msg_prevnode(th2));
+	pr_debug("flush is %d\n", flush);
+	pr_debug("Matching packets:\n");
+	pr_debug("th oport=%u th2 oport=%u\n", msg_origport(th), msg_origport(th2));
+	pr_debug("th dport=%u th2 dport=%u\n", msg_destport(th), msg_destport(th2));
+	pr_debug("th pnode=0x%x th2 pnode=0x%x\n", msg_prevnode(th), msg_prevnode(th2));
 
-	pr_info("th seq=%d gro_len(p)=%d, napi count= %d th2 seq=%d\n", msg_seqno(th),
+	pr_debug("th seq=%d gro_len(p)=%d, napi count= %d th2 seq=%d\n", msg_seqno(th),
 				skb_gro_len(p),NAPI_GRO_CB(p)->count, msg_seqno(th2));
 	flush |= ((msg_seqno(th2) + NAPI_GRO_CB(p)->count) ^ msg_seqno(th));
 	if (flush || skb_gro_receive(head, skb))
@@ -511,13 +498,13 @@ out_check_final:
 	flush = (msg_errcode(msg) != 0);
 	
 	if (p && (!NAPI_GRO_CB(skb)->same_flow || flush)){
-		pr_info("packets are not for the same flow, or flush is set\n");
+		pr_debug("packets are not for the same flow, or flush is set\n");
 		pp = head;
 	}
 
 out:
 	NAPI_GRO_CB(skb)->flush |= flush;
-	pr_info("conn_gro_receive returns %p, head = %p, skb=%p\n", pp,
+	pr_debug("conn_gro_receive returns %p, head = %p, skb=%p\n", pp,
 			head, skb);
 	return pp;
 }
@@ -528,9 +515,10 @@ static int conn_gro_complete(struct sk_buff *skb)
 
 	msg = buf_msg(skb);
 	newlen = skb->len - skb_network_offset(skb);
-	pr_info("conn_gro_complete:update length to %d\n",newlen);
+	pr_debug("conn_gro_complete:update length to %d\n",newlen);
 	msg_set_size(msg, newlen);
 	skb_shinfo(skb)->gso_segs = NAPI_GRO_CB(skb)->count;
+	skb_shinfo(skb)->gso_type = SKB_GSO_TIPC;
 	return 0;
 }
 
@@ -572,10 +560,10 @@ static struct sk_buff **tipc_gro_receive(struct sk_buff **head,
 	*/
 	if (!msg_isdata(msg))
 		goto out;
-	pr_info("rcvd message with seqno %d\n", msg_seqno(msg));
+	pr_debug("rcvd message with seqno %d\n", msg_seqno(msg));
 	switch(msg_type(msg)) {
 		case TIPC_CONN_MSG:
-			pr_info("gro_receive for TIPC_CONN_MSG\n");
+			pr_debug("gro_receive for TIPC_CONN_MSG\n");
 			pp = conn_offload.callbacks.gro_receive(head, skb);
 			break;
 		default:
@@ -588,8 +576,8 @@ static struct sk_buff **tipc_gro_receive(struct sk_buff **head,
 
 out:
 	NAPI_GRO_CB(skb)->flush |= flush;
-	pr_info("tipc_gro_receive returns %p \n", pp  );
-	pr_info("flush bits for skb is %d\n",NAPI_GRO_CB(skb)->flush);
+	pr_debug("tipc_gro_receive returns %p \n", pp  );
+	pr_debug("flush bits for skb is %d\n",NAPI_GRO_CB(skb)->flush);
 	return pp;
 }
 
@@ -598,14 +586,14 @@ static int tipc_gro_complete(struct sk_buff *skb)
 	struct tipc_msg *msg;
 	int err = -ENOSYS;
 	msg = buf_msg(skb);
-	pr_info("tipc_gro_complete for message type %d\n", msg_type(msg));
+	pr_debug("tipc_gro_complete for message type %d\n", msg_type(msg));
 	if (!msg_isdata(msg)) {
 		pr_err("non-data message GRO'd\n");
 		dump_stack();
 	}
 	switch(msg_type(msg)){
 		case TIPC_CONN_MSG:
-			pr_info("gro_complete for TIPC_CONN_MSG\n");
+			pr_debug("gro_complete for TIPC_CONN_MSG\n");
 			err = conn_offload.callbacks.gro_complete(skb);
 			break;
 		default:

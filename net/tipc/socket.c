@@ -962,11 +962,14 @@ restart:
 		else
 			res = -ECONNRESET;
 	}
-
+	if (skb_shinfo(buf)->gso_segs)
+		tport->conn_unacked += skb_shinfo(buf)->gso_segs;
+	else
+		tport->conn_unacked++;
 	/* Consume received message (optional) */
 	if (likely(!(flags & MSG_PEEK))) {
 		if ((sock->state != SS_READY) &&
-		    (++tport->conn_unacked >= TIPC_FLOW_CONTROL_WIN))
+		    (tport->conn_unacked >= TIPC_FLOW_CONTROL_WIN))
 			tipc_acknowledge(tport->ref, tport->conn_unacked);
 		advance_rx_queue(sk);
 	}

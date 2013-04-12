@@ -600,8 +600,8 @@ void tipc_eth_media_stop(void)
 {
 	if (!eth_started)
 		return;
-
 	flush_scheduled_work();
+	dev_remove_offload(&tipc_packet_offload);
 	unregister_netdevice_notifier(&notifier);
 	eth_started = 0;
 }

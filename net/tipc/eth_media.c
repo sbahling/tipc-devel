@@ -421,8 +421,7 @@ found:
 	if (flush || skb_gro_receive(head, skb))
 		goto out_check_final;
 	p = *head;
-	th2 = buf_msg(p);
-
+	pskb_trim(skb,skb->mac_len + msg_size(th));
 out_check_final:
 	flush = (msg_errcode(msg) != 0);
 	if (p && (!NAPI_GRO_CB(skb)->same_flow || flush))

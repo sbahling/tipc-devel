@@ -416,7 +416,11 @@ static struct sk_buff **conn_gro_receive(struct sk_buff **head,
 
 found:
 	flush = NAPI_GRO_CB(p)->flush;
-	flush |= ((msg_seqno(th2) + NAPI_GRO_CB(p)->count) ^ msg_seqno(th));
+	if ((msg_seqno(th2) + NAPI_GRO_CB(p)->count) ^ msg_seqno(th))
+	{
+		flush |= 1;
+		NAPI_GRO_CB(p)->same_flow = 0;
+	}
 	flush |= (msg_errcode(msg) != 0);
 	if (flush || skb_gro_receive(head, skb))
 		goto out_check_final;

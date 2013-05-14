@@ -376,6 +376,16 @@ static inline void msg_set_destnode(struct tipc_msg *m, u32 a)
 	msg_set_word(m, 7, a);
 }
 
+static inline u32 msg_timestamp(struct tipc_msg *m)
+{
+	return msg_word(m, 8);
+}
+
+static inline void msg_set_timestamp(struct tipc_msg *m, u32 t)
+{
+	msg_set_word(m, 8, t);
+}
+
 static inline u32 msg_nametype(struct tipc_msg *m)
 {
 	return msg_word(m, 8);

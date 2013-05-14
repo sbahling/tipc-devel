@@ -40,6 +40,8 @@
 #include "msg.h"
 #include "node.h"
 
+#define tipc_time_stamp ((__u32)(jiffies))
+
 /*
  * Out-of-range value for link sequence numbers
  */
@@ -196,6 +198,11 @@ struct tipc_link {
 	struct sk_buff *next_out;
 	struct list_head waiting_ports;
 
+	/*RTT*/
+	struct timeval probe_ts;
+	u32 srtt;
+	u32 rttvar;
+
 	/* Fragmentation/defragmentation */
 	u32 long_msg_seq_no;
 	struct sk_buff *defragm_buf;
@@ -237,7 +244,7 @@ int  tipc_link_recv_fragment(struct sk_buff **pending,
 			     struct tipc_msg **msg);
 void tipc_link_send_proto_msg(struct tipc_link *l_ptr, u32 msg_typ, int prob,
 			      u32 gap, u32 tolerance, u32 priority,
-			      u32 acked_mtu);
+			      u32 acked_mtu, u32 probe_ts);
 void tipc_link_push_queue(struct tipc_link *l_ptr);
 u32 tipc_link_defer_pkt(struct sk_buff **head, struct sk_buff **tail,
 		   struct sk_buff *buf);

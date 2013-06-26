@@ -23,11 +23,11 @@ menuconfig TIPC
 config TIPC_PORTS
 	int "Maximum number of ports in a node"
 	depends on TIPC
-	range 127 65535
-	default "8191"
+	range 127 131071
+	default "131071"
 	help
 	  Specifies how many ports can be supported by a node.
-	  Can range from 127 to 65535 ports; default is 8191.
+	  Can range from 127 to 131071 ports; default is 131071.
 
 	  Setting this to a smaller value saves some memory,
 	  setting it to higher allows for more ports.
